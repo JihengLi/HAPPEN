@@ -1,0 +1,31 @@
+{% extends "base.html" %} {% block title %}Subjects | {{ dataset }}{% endblock
+%} {% block content %}
+<div class="page-title">Subjects</div>
+<div class="page-subtitle">
+  Dataset: <b>{{ dataset }}</b>
+  &nbsp;&nbsp;|&nbsp;&nbsp; {{ done_subjects }}/{{ total_subjects }} subjects
+  done
+</div>
+
+<div class="card">
+  <div class="list">
+    {% for r in rows %}
+    <a class="list-item {% if r.is_done %}done{% endif %}" href="{{ r.href }}">
+      <div class="list-main">
+        <div class="list-title">{{ r.subject_id }}</div>
+        <div class="list-subtitle">
+          {{ r.done_pairs }}/{{ r.total_pairs }} pairs
+        </div>
+      </div>
+      <div class="list-right">
+        {% if r.is_done %}
+        <span class="badge badge-done">Done</span>
+        {% else %}
+        <span class="badge badge-todo">Todo</span>
+        {% endif %}
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

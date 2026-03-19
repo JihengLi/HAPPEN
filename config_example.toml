@@ -1,0 +1,46 @@
+[run]
+out = "./test"
+stages = ["exact", "near"]
+
+[exact]
+root = ""
+candidates_csv = ""
+valid_csv = "./test/exact/valid.csv"
+modality = "T1w"
+thread_workers = 16
+process_workers = 16
+
+[near]
+preprocess_workers = 16
+batch_size = 16
+device = "auto"
+use_amp = true
+normalize = true
+overwrite_embeddings = false
+fail_fast = false
+
+crop_shape = [160, 192, 160]
+axial_axis = 2
+slices_2p5d = 32
+slice_stride = 1
+winsor = [1.0, 99.0]
+hist_matching = false
+repro = false
+delete_extras = true
+inflight_factor = 2
+
+topk = 500
+retrieval_batch_size = 2048
+use_ivf = true
+nlist = 4096
+nprobe = 64
+train_size = 200000
+seed = 0
+overwrite_retrieval = false
+min_similarity = 0.8
+
+review_mode = "off"   # off | lazy | precompute
+review_workers = 24
+overwrite_review_assets = false
+max_scan_candidates_per_query = 20
+max_subject_candidates_per_query = 10

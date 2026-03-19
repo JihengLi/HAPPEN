@@ -1,0 +1,29 @@
+{% extends "base.html" %} {% block title %}Datasets | Human-in-the-Loop
+Duplicate Review{% endblock %} {% block content %}
+<div class="page-title">Datasets</div>
+<div class="page-subtitle">
+  {{ done_datasets }}/{{ total_datasets }} datasets done
+</div>
+
+<div class="card">
+  <div class="list">
+    {% for r in rows %}
+    <a class="list-item {% if r.is_done %}done{% endif %}" href="{{ r.href }}">
+      <div class="list-main">
+        <div class="list-title">{{ r.dataset }}</div>
+        <div class="list-subtitle">
+          {{ r.done_subjects }}/{{ r.total_subjects }} subjects done
+        </div>
+      </div>
+      <div class="list-right">
+        {% if r.is_done %}
+        <span class="badge badge-done">Done</span>
+        {% else %}
+        <span class="badge badge-todo">Todo</span>
+        {% endif %}
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

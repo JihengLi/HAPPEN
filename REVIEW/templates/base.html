@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>
+      {% block title %}Human-in-the-Loop Duplicate Review{% endblock %}
+    </title>
+
+    <script>
+      (function () {
+        try {
+          if (sessionStorage.getItem("navLoading") === "1") {
+            document.documentElement.classList.add("nav-loading");
+          }
+        } catch (e) {}
+      })();
+    </script>
+
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='style.css') }}"
+    />
+    {% block extra_head %}{% endblock %}
+  </head>
+  <body>
+    <div class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="{{ url_for('datasets_page') }}"
+          >Human-in-the-Loop Duplicate Review</a
+        >
+        <div class="spacer"></div>
+        {% block topbar_right %}{% endblock %}
+      </div>
+    </div>
+
+    <div class="page" id="pageRoot">{% block content %}{% endblock %}</div>
+
+    <div id="globalLoadingOverlay" class="loading-overlay" aria-hidden="true">
+      <div class="loading-box">
+        <div class="spinner"></div>
+        <div class="loading-text">Loading…</div>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        const LIST_KEY_PREFIX = "scrollpos:";
+
+        function isListPage() {
+          return !!document.querySelector(".list");
+        }
+
+        function scrollKey() {
+          return (
+            LIST_KEY_PREFIX + window.location.pathname + window.location.search
+          );
+        }
+
+        if ("scrollRestoration" in history) {
+          history.scrollRestoration = "manual";
+        }
+
+        window.addEventListener("pagehide", function () {
+          if (!isListPage()) return;
+          try {
+            sessionStorage.setItem(scrollKey(), String(window.scrollY || 0));
+          } catch (e) {}
+        });
+
+        window.addEventListener("pageshow", function (e) {
+          if (!isListPage()) return;
+
+          if (e.persisted) {
+            try {
+              sessionStorage.setItem(scrollKey(), String(window.scrollY || 0));
+            } catch (e2) {}
+            window.location.reload();
+          }
+        });
+
+        window.addEventListener("DOMContentLoaded", function () {
+          if (!isListPage()) return;
+          try {
+            const y = sessionStorage.getItem(scrollKey());
+            if (y !== null) {
+              const yy = parseInt(y, 10);
+              if (Number.isFinite(yy) && yy >= 0) window.scrollTo(0, yy);
+              sessionStorage.removeItem(scrollKey());
+            }
+          } catch (e) {}
+        });
+
+        const overlay = document.getElementById("globalLoadingOverlay");
+
+        function showNavLoading() {
+          document.documentElement.classList.add("nav-loading");
+          try {
+            sessionStorage.setItem("navLoading", "1");
+          } catch (e) {}
+          if (overlay) overlay.style.display = "flex";
+        }
+
+        document.addEventListener(
+          "click",
+          function (e) {
+            const a = e.target.closest("a");
+            if (!a) return;
+            if (a.target === "_blank") return;
+
+            let url;
+            try {
+              url = new URL(a.href, window.location.href);
+            } catch (err) {
+              return;
+            }
+            if (url.origin !== window.location.origin) return;
+
+            if (!url.pathname.startsWith("/review/")) return;
+
+            e.preventDefault();
+            showNavLoading();
+
+            requestAnimationFrame(() => {
+              window.location.href = url.pathname + url.search;
+            });
+          },
+          true,
+        );
+      })();
+    </script>
+
+    {% block extra_scripts %}{% endblock %}
+  </body>
+</html>
