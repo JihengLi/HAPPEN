@@ -64,6 +64,7 @@ def _extract_pair_fields(
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     a0 = payload.get("a", {})
     b0 = payload.get("b", {})
+
     a = {
         "dataset": _clean(a0.get("dataset")),
         "subject_id": _clean(a0.get("subject_id")),
@@ -78,15 +79,22 @@ def _extract_pair_fields(
         "scan_uid": _clean(b0.get("scan_uid")),
         "src_path": _clean(b0.get("src_path")),
     }
+
     if not (
         a["dataset"]
         and a["subject_id"]
         and a["scan_uid"]
+        and a["src_path"]
         and b["dataset"]
         and b["subject_id"]
         and b["scan_uid"]
+        and b["src_path"]
     ):
-        abort(400, "Missing required fields in pair (dataset/subject_id/scan_uid)")
+        abort(
+            400,
+            "Missing required fields in pair " "(dataset/subject_id/scan_uid/src_path)",
+        )
+
     return a, b
 
 
@@ -98,6 +106,7 @@ def _subject_pairs(
 ) -> Tuple[int, int]:
     total = 0
     done = 0
+
     qrs = index.get(ds, {}).get(sbj, [])
     for qr in qrs:
         for cand in qr.candidates:
@@ -116,6 +125,7 @@ def _subject_pairs(
             total += 1
             if store.is_decided(key):
                 done += 1
+
     return done, total
 
 
@@ -127,10 +137,12 @@ def _dataset_subject_done_counts(
     subj_map = index.get(ds, {})
     total_subjects = len(subj_map)
     done_subjects = 0
+
     for sbj in subj_map.keys():
         done_pairs, total_pairs = _subject_pairs(index, ds, sbj, store)
         if total_pairs > 0 and done_pairs == total_pairs:
             done_subjects += 1
+
     return done_subjects, total_subjects
 
 
@@ -146,6 +158,7 @@ def create_app(
     def datasets_page():
         datasets = sorted(index.keys())
         rows = []
+
         for ds in datasets:
             done_s, total_s = _dataset_subject_done_counts(index, ds, decision_store)
             rows.append(
@@ -176,6 +189,7 @@ def create_app(
 
         subjects = sorted(index[ds].keys())
         rows = []
+
         for sbj in subjects:
             done_pairs, total_pairs = _subject_pairs(index, ds, sbj, decision_store)
             rows.append(
@@ -230,6 +244,7 @@ def create_app(
         for qr in qrs:
             q = qr.query
             cands = []
+
             for cand in qr.candidates:
                 c = cand.scanref
                 cands.append(
@@ -242,6 +257,7 @@ def create_app(
                         "similarity": cand.similarity,
                     }
                 )
+
             data.append(
                 {
                     "query": {
@@ -284,8 +300,8 @@ def create_app(
         payload = request.get_json(force=True, silent=False)
         if not _pair_payload_ok(payload):
             abort(400, "Bad payload")
+
         a, b = _extract_pair_fields(payload)
-        reason = _clean(payload.get("reason", ""))
 
         key = decision_store.ensure_default_no(
             a_dataset=a["dataset"],
@@ -298,9 +314,9 @@ def create_app(
             b_session_id=b["session_id"],
             b_scan_uid=b["scan_uid"],
             b_src_path=b["src_path"],
-            reason=reason,
         )
         dec = decision_store.get_decision(key)
+
         return jsonify(
             {
                 "ok": True,
@@ -321,6 +337,7 @@ def create_app(
         payload = request.get_json(force=True, silent=False)
         if not _pair_payload_ok(payload):
             abort(400, "Bad payload")
+
         a, b = _extract_pair_fields(payload)
 
         status = _clean(payload.get("qa_status", "")).lower()
@@ -339,9 +356,9 @@ def create_app(
             b_src_path=b["src_path"],
             qa_status=status,
             reason=reason,
-            keep_reason_if_blank=True,
         )
         dec = decision_store.get_decision(key)
+
         return jsonify(
             {
                 "ok": True,
@@ -362,6 +379,7 @@ def create_app(
         payload = request.get_json(force=True, silent=False)
         if not _pair_payload_ok(payload):
             abort(400, "Bad payload")
+
         a, b = _extract_pair_fields(payload)
 
         key = decision_store.make_pair_key(
@@ -377,8 +395,10 @@ def create_app(
             b_src_path=b["src_path"],
         )
         dec = decision_store.get_decision(key)
+
         if dec is None:
             return jsonify({"ok": True, "decision": None})
+
         return jsonify(
             {
                 "ok": True,

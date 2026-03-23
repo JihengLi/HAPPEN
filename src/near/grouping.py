@@ -221,7 +221,6 @@ def build_scan_candidates(
         atomic_write_csv(pair_df, out_csv)
         return out_csv
 
-    # deduplicate symmetric pairs; keep highest similarity, then best rank
     pair_df = pair_df.sort_values(
         ["scan_uid_a", "scan_uid_b", "similarity", "best_rank"],
         ascending=[True, True, False, True],

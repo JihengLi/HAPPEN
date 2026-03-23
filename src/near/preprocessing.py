@@ -188,6 +188,32 @@ def normalize_t1_minmax(
     return out
 
 
+def _norm_reload(
+    vol_norm: np.ndarray,
+    affine: np.ndarray,
+    header: nib.Nifti1Header,
+) -> np.ndarray:
+    hdr = header.copy()
+    hdr.set_data_dtype(np.float32)
+
+    img = nib.Nifti1Image(
+        vol_norm.astype(np.float32, copy=False),
+        affine,
+        hdr,
+    )
+    img = nib.as_closest_canonical(img)
+
+    arr = img.get_fdata(dtype=np.float32)
+    arr = np.asarray(arr)
+    arr = np.squeeze(arr)
+
+    if arr.ndim != 3:
+        raise ValueError(f"expected 3D nifti after squeeze, got shape={arr.shape}")
+
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    return np.ascontiguousarray(arr.astype(np.float32, copy=False))
+
+
 def _center_index_from_nonzero(arr: np.ndarray, axis: int) -> int:
     nz = np.nonzero(arr)
     if len(nz[0]) == 0:
@@ -359,6 +385,11 @@ def preprocess_resolved_path_2p5d(
             vol=vol,
             brain_mask=brain_mask,
             winsor=winsor,
+        )
+        vol_norm = _norm_reload(
+            vol_norm=vol_norm,
+            affine=reg_img.affine,
+            header=reg_img.header,
         )
 
         vol_norm = _crop_pad_center(vol_norm, crop_shape)

@@ -61,8 +61,9 @@
     const ses = fmtSession(scanObj.session_id);
 
     const base = `Dataset: ${ds}\nSubject: ${sbj}\nSession: ${ses}\n`;
-    if (isCandidate)
+    if (isCandidate) {
       return base + `Similarity: ${fmtSimilarity(scanObj.similarity)}`;
+    }
     return base + "\u00A0";
   }
 
@@ -243,15 +244,63 @@
     btnMaybe.classList.toggle("is-selected", s === "maybe");
   }
 
+  function currentSelectedStatus() {
+    if (btnYes.classList.contains("is-selected")) return "yes";
+    if (btnMaybe.classList.contains("is-selected")) return "maybe";
+    return "no";
+  }
+
   function applyDecisionToUI(decisionOrNull) {
     if (decisionOrNull && decisionOrNull.qa_status) {
       setSelected(decisionOrNull.qa_status);
-      if (typeof decisionOrNull.reason === "string") {
-        reasonBox.value = decisionOrNull.reason;
-      }
+      reasonBox.value =
+        typeof decisionOrNull.reason === "string" ? decisionOrNull.reason : "";
     } else {
       setSelected("no");
+      reasonBox.value = "";
     }
+  }
+
+  async function ensureViewed(a, b) {
+    const res = await postJSON("/api/view", pairPayload(a, b));
+    if (!res.ok) throw new Error("api/view returned not ok");
+    return res;
+  }
+
+  async function savePairState(a, b) {
+    const payload = {
+      ...pairPayload(a, b),
+      qa_status: currentSelectedStatus(),
+      reason: reasonBox.value || "",
+    };
+    const res = await postJSON("/api/decision", payload);
+    if (!res.ok) throw new Error("api/decision returned not ok");
+    return res;
+  }
+
+  async function saveCurrentPairState() {
+    const q = currentQuery();
+    const c = currentCandidate();
+    if (!c) return null;
+    return await savePairState(q, c);
+  }
+
+  async function setDecision(status) {
+    const q = currentQuery();
+    const c = currentCandidate();
+    if (!c) return;
+
+    setSelected(status);
+
+    const payload = {
+      ...pairPayload(q, c),
+      qa_status: status,
+      reason: reasonBox.value || "",
+    };
+    const res = await postJSON("/api/decision", payload);
+    if (!res.ok) throw new Error("api/decision returned not ok");
+
+    applyDecisionToUI(res.decision || null);
   }
 
   const DIFF_MAX = 64;
@@ -386,34 +435,6 @@
     imgEl.src = url;
   }
 
-  async function fetchAndApplyDecision(a, b) {
-    const res = await postJSON("/api/get_decision", pairPayload(a, b));
-    if (!res.ok) throw new Error("api/get_decision returned not ok");
-    applyDecisionToUI(res.decision || null);
-  }
-
-  async function ensureViewedDefaultNo(a, b) {
-    const reason = reasonBox.value || "";
-    const res = await postJSON("/api/view", { ...pairPayload(a, b), reason });
-    if (!res.ok) throw new Error("api/view returned not ok");
-    applyDecisionToUI(res.decision || null);
-  }
-
-  async function setDecision(status) {
-    const q = currentQuery();
-    const c = currentCandidate();
-    if (!c) return;
-
-    setSelected(status);
-
-    const reason = reasonBox.value || "";
-    const payload = { ...pairPayload(q, c), qa_status: status, reason };
-    const res = await postJSON("/api/decision", payload);
-    if (!res.ok) throw new Error("api/decision returned not ok");
-
-    applyDecisionToUI(res.decision || null);
-  }
-
   async function renderAll() {
     const qb = currentQueryBlock();
     const q = qb.query;
@@ -433,8 +454,8 @@
       candMeta.textContent = metaText(c, true);
       setImgOrMissing(candImg, candMissing, buildPngUrl(c));
 
-      await ensureViewedDefaultNo(q, c);
-      await fetchAndApplyDecision(q, c);
+      const res = await ensureViewed(q, c);
+      applyDecisionToUI(res.decision || null);
     } else {
       candMeta.textContent = "No candidates for this query.\n\u00A0";
       candImg.style.display = "none";
@@ -463,12 +484,11 @@
   }
 
   async function moveCandidate(delta) {
-    const q = currentQuery();
     const c = currentCandidate();
     const cands = currentCandidates();
     if (!c || cands.length === 0) return;
 
-    await ensureViewedDefaultNo(q, c);
+    await saveCurrentPairState();
 
     candIdx = (candIdx + delta) % cands.length;
     if (candIdx < 0) candIdx += cands.length;
@@ -477,9 +497,8 @@
   }
 
   async function changeQuery(newIdx) {
-    const oldQ = currentQuery();
     const oldC = currentCandidate();
-    if (oldC) await ensureViewedDefaultNo(oldQ, oldC);
+    if (oldC) await saveCurrentPairState();
 
     if (newIdx < 0 || newIdx >= SUBJECT_DATA.length) {
       throw new Error(`changeQuery out of range: ${newIdx}`);
@@ -496,9 +515,8 @@
     href,
     { goLastQuery } = { goLastQuery: false },
   ) {
-    const q = currentQuery();
     const c = currentCandidate();
-    if (c) await ensureViewedDefaultNo(q, c);
+    if (c) await saveCurrentPairState();
 
     beginNavLoading();
     saveReviewScrollY();
@@ -574,8 +592,9 @@
   querySel.addEventListener("change", () =>
     guarded(async () => {
       const idx = parseInt(querySel.value, 10);
-      if (!Number.isFinite(idx))
+      if (!Number.isFinite(idx)) {
         throw new Error(`Bad querySel value: ${querySel.value}`);
+      }
       await changeQuery(idx);
     }),
   );
@@ -585,6 +604,7 @@
       await moveCandidate(-1);
     }),
   );
+
   btnNext.addEventListener("click", () =>
     guarded(async () => {
       await moveCandidate(+1);
@@ -596,14 +616,33 @@
       await setDecision("yes");
     }),
   );
+
   btnNo.addEventListener("click", () =>
     guarded(async () => {
       await setDecision("no");
     }),
   );
+
   btnMaybe.addEventListener("click", () =>
     guarded(async () => {
       await setDecision("maybe");
+    }),
+  );
+
+  reasonBox.addEventListener("keydown", (e) =>
+    guarded(async () => {
+      if (e.key !== "Enter") return;
+
+      if (e.shiftKey) {
+        return;
+      }
+
+      e.preventDefault();
+
+      const res = await saveCurrentPairState();
+      if (res && res.decision) {
+        applyDecisionToUI(res.decision);
+      }
     }),
   );
 
@@ -615,16 +654,24 @@
 
     if (e.key === "ArrowLeft") {
       e.preventDefault();
-      guarded(async () => await moveCandidate(-1));
+      guarded(async () => {
+        await moveCandidate(-1);
+      });
     } else if (e.key === "ArrowRight") {
       e.preventDefault();
-      guarded(async () => await moveCandidate(+1));
+      guarded(async () => {
+        await moveCandidate(+1);
+      });
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      guarded(async () => await moveQuery(-1));
+      guarded(async () => {
+        await moveQuery(-1);
+      });
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      guarded(async () => await moveQuery(+1));
+      guarded(async () => {
+        await moveQuery(+1);
+      });
     }
   });
 
@@ -634,6 +681,7 @@
     queryIdx = initialQueryIdxFromURL();
     setSelectValueStrict(querySel, String(queryIdx));
     setSelected("no");
+    reasonBox.value = "";
 
     await renderAll();
     await finalizeIfNavLoading();

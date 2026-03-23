@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -25,17 +26,21 @@ from tqdm import tqdm
 
 from ..utils import visualize_t1w
 from .preprocessing import (
-    run_n4,
-    run_deepbet_mask,
-    run_ants_reg_rigid,
     apply_label_affine,
     normalize_t1_minmax,
+    run_ants_reg_rigid,
+    run_deepbet_mask,
+    run_n4,
 )
 
 
 _SCAN_SLOT_RE = re.compile(r"^candidate_(\d+)_dataset$")
 DEFAULT_FRACS: List[float] = [0.30, 0.40, 0.45, 0.50, 0.55, 0.60, 0.70]
 DEFAULT_PERC: Tuple[float, float] = (1.0, 99.0)
+DEFAULT_DIFF_MAX: float = 64.0
+
+SCAN_FAIL_COLS = ["scan_uid", "resolved_path", "png_path", "error"]
+PAIR_FAIL_COLS = ["pair_key", "scan_uid_a", "scan_uid_b", "error"]
 
 
 def clean_str(x: Any) -> str:
@@ -52,19 +57,13 @@ def clean_str(x: Any) -> str:
     return s
 
 
-def atomic_write_csv(df: pd.DataFrame, out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
-    df.to_csv(tmp, index=False)
-    tmp.replace(out_path)
-
-
 def _atomic_save_nifti(
     path: Path,
     data: np.ndarray,
     affine: np.ndarray,
     header: nib.Nifti1Header,
 ) -> None:
+    path = Path(path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
 
     name = path.name
@@ -85,6 +84,18 @@ def _atomic_save_nifti(
     tmp.replace(path)
 
 
+def _write_empty_failure_csv(path: Path, columns: Sequence[str]) -> None:
+    path = Path(path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(columns=list(columns)).to_csv(path, index=False)
+
+
+def clear_review_cache(review_dir: Union[str, Path]) -> None:
+    cache_dir = Path(review_dir).expanduser().resolve() / "cache"
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
+
+
 def _pair_key(scan_uid_a: str, scan_uid_b: str) -> str:
     a = str(scan_uid_a).strip()
     b = str(scan_uid_b).strip()
@@ -93,23 +104,31 @@ def _pair_key(scan_uid_a: str, scan_uid_b: str) -> str:
 
 
 def _norm_cache_path(review_dir: Path, scan_uid: str) -> Path:
-    return review_dir / "cache" / "norm" / f"{scan_uid}.nii.gz"
+    return (
+        Path(review_dir).expanduser().resolve()
+        / "cache"
+        / "norm"
+        / f"{scan_uid}.nii.gz"
+    )
 
 
 def _work_dir(review_dir: Path, scan_uid: str) -> Path:
-    return review_dir / "cache" / "work" / scan_uid
+    return Path(review_dir).expanduser().resolve() / "cache" / "work" / scan_uid
 
 
 def to_uint8(img: np.ndarray) -> np.ndarray:
     a = np.asarray(img)
+
     if a.dtype != np.uint8:
         a = a.astype(np.float32, copy=False)
         vmax = float(a.max()) if a.size else 1.0
         vmin = float(a.min()) if a.size else 0.0
+
         if vmax <= 1.0 and vmin >= 0.0:
             a = a * 255.0
         else:
             a = (a - vmin) / (vmax - vmin + 1e-6) * 255.0
+
         a = np.clip(a, 0, 255).astype(np.uint8)
 
     if a.ndim == 2:
@@ -118,12 +137,14 @@ def to_uint8(img: np.ndarray) -> np.ndarray:
         a = np.repeat(a, 3, axis=-1)
     elif a.ndim == 3 and a.shape[-1] == 4:
         a = a[..., :3]
+
     return a
 
 
 def split_mosaic_to_three(img: np.ndarray) -> List[np.ndarray]:
     img = to_uint8(img)
     h, w = img.shape[:2]
+
     if w >= h:
         tile_w = w // 3
         tiles = [img[:, i * tile_w : (i + 1) * tile_w, ...] for i in range(3)]
@@ -148,25 +169,26 @@ def hstack_with_padding(
     pad_value: int = 0,
     gap: int = 0,
 ) -> np.ndarray:
-    cols_u8 = []
+    cols_u8: List[np.ndarray] = []
     for c in columns:
         cc = to_uint8(c)
         if cc.ndim == 2:
             cc = np.stack([cc, cc, cc], axis=-1)
         cols_u8.append(cc)
 
+    if not cols_u8:
+        raise ValueError("columns must not be empty")
+
     heights = [c.shape[0] for c in cols_u8]
     widths = [c.shape[1] for c in cols_u8]
     H = max(heights)
     W = max(widths)
 
-    out = []
+    out: List[np.ndarray] = []
     for i, cc in enumerate(cols_u8):
         if cc.shape[1] < W:
             pad_w = np.full(
-                (cc.shape[0], W - cc.shape[1], 3),
-                pad_value,
-                dtype=cc.dtype,
+                (cc.shape[0], W - cc.shape[1], 3), pad_value, dtype=cc.dtype
             )
             cc = np.hstack([cc, pad_w])
         elif cc.shape[1] > W:
@@ -186,10 +208,6 @@ def hstack_with_padding(
     return np.hstack(out)
 
 
-def _blank_col(h: int = 256 * 3, w: int = 256, v: int = 230) -> np.ndarray:
-    return np.ones((h, w, 3), dtype=np.uint8) * v
-
-
 def _load_nifti_shape_3d(nifti_path: Path) -> Tuple[int, int, int]:
     img = nib.load(str(nifti_path), mmap=True)
     img_ras = nib.as_closest_canonical(img)
@@ -197,52 +215,87 @@ def _load_nifti_shape_3d(nifti_path: Path) -> Tuple[int, int, int]:
     return int(sx), int(sy), int(sz)
 
 
-def _frac_to_index(frac: float, L: int) -> int:
-    if L <= 1:
+def _frac_to_index(frac: float, length: int) -> int:
+    if length <= 1:
         return 0
-    idx = int(round(frac * (L - 1)))
-    return max(0, min(L - 1, idx))
+    idx = int(round(frac * (length - 1)))
+    return max(0, min(length - 1, idx))
 
 
 def build_percent_groups(nifti_path: Path, fracs: Sequence[float]) -> List[dict]:
     sx, sy, sz = _load_nifti_shape_3d(nifti_path)
     groups: List[dict] = []
+
     for f in fracs:
         groups.append(
-            dict(
-                sagittal_slices=_frac_to_index(float(f), sx),
-                coronal_slices=_frac_to_index(float(f), sy),
-                axial_slices=_frac_to_index(float(f), sz),
-            )
+            {
+                "sagittal_slices": _frac_to_index(float(f), sx),
+                "coronal_slices": _frac_to_index(float(f), sy),
+                "axial_slices": _frac_to_index(float(f), sz),
+            }
         )
+
     return groups
 
 
-def _safe_columns_for_groups(nifti_path: Path, groups: List[dict]) -> List[np.ndarray]:
+def _columns_for_groups(nifti_path: Path, groups: List[dict]) -> List[np.ndarray]:
     cols: List[np.ndarray] = []
+
     for g in groups:
-        try:
-            mosaic = visualize_t1w(
-                t1_file=str(nifti_path),
-                sagittal_slices=g["sagittal_slices"],
-                coronal_slices=g["coronal_slices"],
-                axial_slices=g["axial_slices"],
-                perc=DEFAULT_PERC,
-                save_path=None,
-                show_img=False,
-            )
-            cols.append(make_column_from_mosaic(mosaic))
-        except Exception:
-            cols.append(_blank_col())
+        mosaic = visualize_t1w(
+            t1_file=str(nifti_path),
+            sagittal_slices=g["sagittal_slices"],
+            coronal_slices=g["coronal_slices"],
+            axial_slices=g["axial_slices"],
+            perc=DEFAULT_PERC,
+            save_path=None,
+            show_img=False,
+        )
+        cols.append(make_column_from_mosaic(mosaic))
+
     return cols
 
 
-def _difference_tile(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    aa = to_uint8(a).astype(np.float32)
-    bb = to_uint8(b).astype(np.float32)
-    diff = np.abs(aa - bb).mean(axis=-1)
-    diff = np.clip(diff, 0, 255).astype(np.uint8)
-    return to_uint8(diff)
+def _difference_tile(
+    query_img: np.ndarray,
+    candidate_img: np.ndarray,
+    diff_max: float = DEFAULT_DIFF_MAX,
+) -> np.ndarray:
+    qq = to_uint8(query_img).astype(np.float32)
+    cc = to_uint8(candidate_img).astype(np.float32)
+
+    h = min(qq.shape[0], cc.shape[0])
+    w = min(qq.shape[1], cc.shape[1])
+    qq = qq[:h, :w]
+    cc = cc[:h, :w]
+
+    qv = qq[..., 0]
+    cv = cc[..., 0]
+
+    d = qv - cv
+    t = np.clip(d / float(diff_max), -1.0, 1.0)
+
+    out = np.empty((h, w, 3), dtype=np.float32)
+
+    pos = t >= 0
+    neg = ~pos
+
+    # default white
+    out[..., 0] = 255.0
+    out[..., 1] = 255.0
+    out[..., 2] = 255.0
+
+    # positive: white -> red
+    out[pos, 1] = 255.0 * (1.0 - t[pos])
+    out[pos, 2] = 255.0 * (1.0 - t[pos])
+
+    # negative: blue -> white
+    u = 1.0 + t[neg]  # -1 -> 0, 0 -> 1
+    out[neg, 0] = 255.0 * u
+    out[neg, 1] = 255.0 * u
+    out[neg, 2] = 255.0
+
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def _checkerboard_tile(a: np.ndarray, b: np.ndarray, tile: int = 16) -> np.ndarray:
@@ -269,11 +322,12 @@ def _pair_column_from_mosaics(
     img_a: np.ndarray,
     img_b: np.ndarray,
     kind: str,
+    diff_max: float = DEFAULT_DIFF_MAX,
 ) -> np.ndarray:
     tiles_a = split_mosaic_to_three(img_a)
     tiles_b = split_mosaic_to_three(img_b)
 
-    out_tiles = []
+    out_tiles: List[np.ndarray] = []
     for ta, tb in zip(tiles_a, tiles_b):
         h = min(ta.shape[0], tb.shape[0])
         w = min(ta.shape[1], tb.shape[1])
@@ -281,7 +335,7 @@ def _pair_column_from_mosaics(
         tb = tb[:h, :w]
 
         if kind == "diff":
-            out_tiles.append(_difference_tile(ta, tb))
+            out_tiles.append(_difference_tile(ta, tb, diff_max=diff_max))
         elif kind == "checkerboard":
             out_tiles.append(_checkerboard_tile(ta, tb))
         else:
@@ -292,36 +346,43 @@ def _pair_column_from_mosaics(
     return np.vstack(out_tiles)
 
 
-def _safe_pair_columns_for_groups(
+def _pair_columns_for_groups(
     nifti_path_a: Path,
     nifti_path_b: Path,
     groups: List[dict],
     kind: str,
+    diff_max: float = DEFAULT_DIFF_MAX,
 ) -> List[np.ndarray]:
     cols: List[np.ndarray] = []
+
     for g in groups:
-        try:
-            img_a = visualize_t1w(
-                t1_file=str(nifti_path_a),
-                sagittal_slices=g["sagittal_slices"],
-                coronal_slices=g["coronal_slices"],
-                axial_slices=g["axial_slices"],
-                perc=DEFAULT_PERC,
-                save_path=None,
-                show_img=False,
+        img_a = visualize_t1w(
+            t1_file=str(nifti_path_a),
+            sagittal_slices=g["sagittal_slices"],
+            coronal_slices=g["coronal_slices"],
+            axial_slices=g["axial_slices"],
+            perc=DEFAULT_PERC,
+            save_path=None,
+            show_img=False,
+        )
+        img_b = visualize_t1w(
+            t1_file=str(nifti_path_b),
+            sagittal_slices=g["sagittal_slices"],
+            coronal_slices=g["coronal_slices"],
+            axial_slices=g["axial_slices"],
+            perc=DEFAULT_PERC,
+            save_path=None,
+            show_img=False,
+        )
+        cols.append(
+            _pair_column_from_mosaics(
+                img_a,
+                img_b,
+                kind=kind,
+                diff_max=diff_max,
             )
-            img_b = visualize_t1w(
-                t1_file=str(nifti_path_b),
-                sagittal_slices=g["sagittal_slices"],
-                coronal_slices=g["coronal_slices"],
-                axial_slices=g["axial_slices"],
-                perc=DEFAULT_PERC,
-                save_path=None,
-                show_img=False,
-            )
-            cols.append(_pair_column_from_mosaics(img_a, img_b, kind=kind))
-        except Exception:
-            cols.append(_blank_col())
+        )
+
     return cols
 
 
@@ -330,16 +391,18 @@ def render_scan_png(
     out_path: Path,
     overwrite: bool,
 ) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if out_path.exists() and not overwrite:
-        return
+    norm_path = Path(norm_path).expanduser().resolve()
+    out_path = Path(out_path).expanduser().resolve()
 
     if not norm_path.exists():
         raise FileNotFoundError(f"norm_path not found: {norm_path}")
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists() and not overwrite:
+        return
+
     groups = build_percent_groups(norm_path, fracs=DEFAULT_FRACS)
-    cols = _safe_columns_for_groups(norm_path, groups=groups)
+    cols = _columns_for_groups(norm_path, groups=groups)
     final_img = hstack_with_padding(cols, pad_value=0, gap=0)
     Image.fromarray(to_uint8(final_img)).save(out_path)
 
@@ -350,32 +413,35 @@ def render_pair_png(
     out_path: Path,
     kind: str,
     overwrite: bool,
+    diff_max: float = DEFAULT_DIFF_MAX,
 ) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if out_path.exists() and not overwrite:
-        return
+    norm_path_a = Path(norm_path_a).expanduser().resolve()
+    norm_path_b = Path(norm_path_b).expanduser().resolve()
+    out_path = Path(out_path).expanduser().resolve()
 
     if not norm_path_a.exists():
         raise FileNotFoundError(f"norm_path_a not found: {norm_path_a}")
     if not norm_path_b.exists():
         raise FileNotFoundError(f"norm_path_b not found: {norm_path_b}")
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists() and not overwrite:
+        return
+
     groups = build_percent_groups(norm_path_a, fracs=DEFAULT_FRACS)
-    cols = _safe_pair_columns_for_groups(
+    cols = _pair_columns_for_groups(
         norm_path_a,
         norm_path_b,
         groups=groups,
         kind=kind,
+        diff_max=diff_max,
     )
     final_img = hstack_with_padding(cols, pad_value=0, gap=0)
     Image.fromarray(to_uint8(final_img)).save(out_path)
 
 
-def _read_manifest(
-    manifest_csv: Union[str, Path],
-) -> pd.DataFrame:
-    manifest_csv = Path(manifest_csv)
+def _read_manifest(manifest_csv: Union[str, Path]) -> pd.DataFrame:
+    manifest_csv = Path(manifest_csv).expanduser().resolve()
 
     required_cols = [
         "dataset",
@@ -400,9 +466,7 @@ def _read_manifest(
     return df
 
 
-def _manifest_meta_map(
-    manifest_df: pd.DataFrame,
-) -> Dict[str, Dict[str, str]]:
+def _manifest_meta_map(manifest_df: pd.DataFrame) -> Dict[str, Dict[str, str]]:
     out: Dict[str, Dict[str, str]] = {}
     for _, r in manifest_df.iterrows():
         uid = str(r["scan_uid"])
@@ -416,7 +480,7 @@ def _manifest_meta_map(
 
 
 def _candidate_slots_from_cols(cols: Sequence[str]) -> List[int]:
-    slots = []
+    slots: List[int] = []
     for c in cols:
         m = _SCAN_SLOT_RE.match(str(c).strip())
         if m:
@@ -424,11 +488,10 @@ def _candidate_slots_from_cols(cols: Sequence[str]) -> List[int]:
     return sorted(set(slots))
 
 
-def _read_scan_level_review(
-    scan_level_review_csv: Union[str, Path],
-) -> pd.DataFrame:
-    scan_level_review_csv = Path(scan_level_review_csv)
+def _read_scan_level_review(scan_level_review_csv: Union[str, Path]) -> pd.DataFrame:
+    scan_level_review_csv = Path(scan_level_review_csv).expanduser().resolve()
     df = pd.read_csv(scan_level_review_csv, dtype=str).fillna("")
+
     required_cols = [
         "query_dataset",
         "query_subject_id",
@@ -442,14 +505,16 @@ def _read_scan_level_review(
         raise ValueError(
             f"{scan_level_review_csv} is missing required columns: {missing}"
         )
+
     return df
 
 
 def _read_subject_level_review(
     subject_level_review_csv: Union[str, Path],
 ) -> pd.DataFrame:
-    subject_level_review_csv = Path(subject_level_review_csv)
+    subject_level_review_csv = Path(subject_level_review_csv).expanduser().resolve()
     df = pd.read_csv(subject_level_review_csv, dtype=str).fillna("")
+
     required_cols = [
         "group_id",
         "group_size",
@@ -462,6 +527,7 @@ def _read_subject_level_review(
         raise ValueError(
             f"{subject_level_review_csv} is missing required columns: {missing}"
         )
+
     return df
 
 
@@ -473,10 +539,16 @@ def _register_unique_path(
 ) -> None:
     k = str(key).strip()
     p = str(rel_path).strip()
+
     if not k:
         return
+
+    if not p:
+        raise ValueError(f"empty {kind} path for key={k}")
+
     if k in mapping and mapping[k] != p:
         raise ValueError(f"inconsistent {kind} path for key={k}: {mapping[k]} vs {p}")
+
     mapping[k] = p
 
 
@@ -497,10 +569,12 @@ def collect_scan_requests(
             str(r["query_png_path"]),
             kind="scan png",
         )
+
         for k in scan_slots:
             ds = clean_str(r.get(f"candidate_{k}_dataset", ""))
             if not ds:
                 continue
+
             _register_unique_path(
                 scan_uid_to_png,
                 str(r.get(f"candidate_{k}_scan_uid", "")),
@@ -514,6 +588,7 @@ def collect_scan_requests(
             ds = clean_str(r.get(f"candidate_{k}_dataset", ""))
             if not ds:
                 continue
+
             _register_unique_path(
                 scan_uid_to_png,
                 str(r.get(f"candidate_{k}_query_exemplar_scan_uid", "")),
@@ -542,27 +617,42 @@ def collect_pair_requests(
     scan_slots = _candidate_slots_from_cols(scan_df.columns.tolist())
     for _, r in scan_df.iterrows():
         q_uid = str(r["query_scan_uid"]).strip()
+
         for k in scan_slots:
             ds = clean_str(r.get(f"candidate_{k}_dataset", ""))
             if not ds:
                 continue
+
             c_uid = str(r.get(f"candidate_{k}_scan_uid", "")).strip()
             if not c_uid:
-                continue
-            pkey = _pair_key(q_uid, c_uid)
+                raise ValueError(
+                    f"missing candidate_{k}_scan_uid for query_scan_uid={q_uid}"
+                )
+
             diff_path = str(r.get(f"candidate_{k}_diff_path", "")).strip()
             cb_path = str(r.get(f"candidate_{k}_checkerboard_path", "")).strip()
+
+            if not diff_path:
+                raise ValueError(
+                    f"missing candidate_{k}_diff_path for pair {q_uid}, {c_uid}"
+                )
+            if not cb_path:
+                raise ValueError(
+                    f"missing candidate_{k}_checkerboard_path for pair {q_uid}, {c_uid}"
+                )
+
+            pkey = _pair_key(q_uid, c_uid)
             rec = {
                 "scan_uid_a": min(q_uid, c_uid),
                 "scan_uid_b": max(q_uid, c_uid),
                 "diff_path": diff_path,
                 "checkerboard_path": cb_path,
             }
-            if pkey in pair_map:
-                if pair_map[pkey] != rec:
-                    raise ValueError(f"inconsistent pair asset paths for {pkey}")
-            else:
-                pair_map[pkey] = rec
+
+            if pkey in pair_map and pair_map[pkey] != rec:
+                raise ValueError(f"inconsistent pair asset paths for {pkey}")
+
+            pair_map[pkey] = rec
 
     subj_slots = _candidate_slots_from_cols(subj_df.columns.tolist())
     for _, r in subj_df.iterrows():
@@ -570,24 +660,39 @@ def collect_pair_requests(
             ds = clean_str(r.get(f"candidate_{k}_dataset", ""))
             if not ds:
                 continue
+
             q_uid = str(r.get(f"candidate_{k}_query_exemplar_scan_uid", "")).strip()
             c_uid = str(r.get(f"candidate_{k}_candidate_exemplar_scan_uid", "")).strip()
+
             if not q_uid or not c_uid:
-                continue
-            pkey = _pair_key(q_uid, c_uid)
+                raise ValueError(
+                    f"missing exemplar scan_uid in subject-level review slot {k}"
+                )
+
             diff_path = str(r.get(f"candidate_{k}_diff_path", "")).strip()
             cb_path = str(r.get(f"candidate_{k}_checkerboard_path", "")).strip()
+
+            if not diff_path:
+                raise ValueError(
+                    f"missing candidate_{k}_diff_path for pair {q_uid}, {c_uid}"
+                )
+            if not cb_path:
+                raise ValueError(
+                    f"missing candidate_{k}_checkerboard_path for pair {q_uid}, {c_uid}"
+                )
+
+            pkey = _pair_key(q_uid, c_uid)
             rec = {
                 "scan_uid_a": min(q_uid, c_uid),
                 "scan_uid_b": max(q_uid, c_uid),
                 "diff_path": diff_path,
                 "checkerboard_path": cb_path,
             }
-            if pkey in pair_map:
-                if pair_map[pkey] != rec:
-                    raise ValueError(f"inconsistent pair asset paths for {pkey}")
-            else:
-                pair_map[pkey] = rec
+
+            if pkey in pair_map and pair_map[pkey] != rec:
+                raise ValueError(f"inconsistent pair asset paths for {pkey}")
+
+            pair_map[pkey] = rec
 
     return pair_map
 
@@ -601,11 +706,27 @@ def _build_review_norm_cache(
     hist_matching: bool,
     repro: bool,
     delete_extras: bool,
+    overwrite: bool = False,
 ) -> Path:
-    if out_norm_path.exists():
+    resolved_path = Path(resolved_path).expanduser().resolve()
+    atlas_image = Path(atlas_image).expanduser().resolve()
+    out_norm_path = Path(out_norm_path).expanduser().resolve()
+    work_dir = Path(work_dir).expanduser().resolve()
+
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"input image not found: {resolved_path}")
+    if not atlas_image.exists():
+        raise FileNotFoundError(f"atlas image not found: {atlas_image}")
+
+    if out_norm_path.exists() and not overwrite:
         return out_norm_path
 
+    if overwrite and out_norm_path.exists():
+        out_norm_path.unlink()
+
+    shutil.rmtree(work_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, exist_ok=True)
+    out_norm_path.parent.mkdir(parents=True, exist_ok=True)
 
     n4_path = work_dir / "n4.nii.gz"
     masked_brain_path = work_dir / "masked_brain.nii.gz"
@@ -672,6 +793,154 @@ def _build_review_norm_cache(
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def _scan_asset_worker(
+    rec: Dict[str, str],
+    atlas_image: str,
+    overwrite: bool,
+    winsor: Tuple[float, float],
+    hist_matching: bool,
+    repro: bool,
+    delete_extras: bool,
+) -> int:
+    norm_path = _build_review_norm_cache(
+        resolved_path=Path(rec["resolved_path"]),
+        atlas_image=Path(atlas_image),
+        out_norm_path=Path(rec["norm_path"]),
+        work_dir=Path(rec["work_dir"]),
+        winsor=winsor,
+        hist_matching=hist_matching,
+        repro=repro,
+        delete_extras=delete_extras,
+        overwrite=overwrite,
+    )
+
+    render_scan_png(
+        norm_path=norm_path,
+        out_path=Path(rec["png_path"]),
+        overwrite=overwrite,
+    )
+    return 1
+
+
+def _norm_cache_worker(
+    rec: Dict[str, str],
+    atlas_image: str,
+    overwrite: bool,
+    winsor: Tuple[float, float],
+    hist_matching: bool,
+    repro: bool,
+    delete_extras: bool,
+) -> int:
+    _build_review_norm_cache(
+        resolved_path=Path(rec["resolved_path"]),
+        atlas_image=Path(atlas_image),
+        out_norm_path=Path(rec["norm_path"]),
+        work_dir=Path(rec["work_dir"]),
+        winsor=winsor,
+        hist_matching=hist_matching,
+        repro=repro,
+        delete_extras=delete_extras,
+        overwrite=overwrite,
+    )
+    return 1
+
+
+def _pair_asset_worker(
+    rec: Dict[str, str],
+    overwrite: bool,
+    diff_max: float,
+) -> int:
+    norm_path_a = Path(rec["norm_path_a"]).expanduser().resolve()
+    norm_path_b = Path(rec["norm_path_b"]).expanduser().resolve()
+
+    if not norm_path_a.exists():
+        raise FileNotFoundError(f"norm_path_a not found: {norm_path_a}")
+    if not norm_path_b.exists():
+        raise FileNotFoundError(f"norm_path_b not found: {norm_path_b}")
+
+    render_pair_png(
+        norm_path_a=norm_path_a,
+        norm_path_b=norm_path_b,
+        out_path=Path(rec["diff_path"]),
+        kind="diff",
+        overwrite=overwrite,
+        diff_max=diff_max,
+    )
+    render_pair_png(
+        norm_path_a=norm_path_a,
+        norm_path_b=norm_path_b,
+        out_path=Path(rec["checkerboard_path"]),
+        kind="checkerboard",
+        overwrite=overwrite,
+        diff_max=diff_max,
+    )
+    return 1
+
+
+def _run_parallel_futures(
+    futures: List[Any],
+    desc: str,
+    unit: str,
+) -> int:
+    ok_total = 0
+    for fut in tqdm(as_completed(futures), total=len(futures), desc=desc, unit=unit):
+        ok_total += int(fut.result())
+    return ok_total
+
+
+def _precompute_pair_norm_caches(
+    review_dir: Path,
+    atlas_image: Path,
+    meta_map: Dict[str, Dict[str, str]],
+    pair_requests: Dict[str, Dict[str, str]],
+    workers: int,
+    overwrite: bool,
+    winsor: Tuple[float, float],
+    hist_matching: bool,
+    repro: bool,
+    delete_extras: bool,
+) -> int:
+    needed_scan_uids = sorted(
+        {rec["scan_uid_a"] for rec in pair_requests.values()}
+        | {rec["scan_uid_b"] for rec in pair_requests.values()}
+    )
+
+    recs: List[Dict[str, str]] = []
+    for scan_uid in needed_scan_uids:
+        meta = meta_map[scan_uid]
+        recs.append(
+            {
+                "scan_uid": scan_uid,
+                "resolved_path": meta["resolved_path"],
+                "norm_path": str(_norm_cache_path(review_dir, scan_uid)),
+                "work_dir": str(_work_dir(review_dir, scan_uid)),
+            }
+        )
+
+    with ProcessPoolExecutor(
+        max_workers=int(workers),
+        mp_context=get_context("spawn"),
+    ) as ex:
+        futures = [
+            ex.submit(
+                _norm_cache_worker,
+                rec,
+                str(atlas_image),
+                bool(overwrite),
+                winsor,
+                bool(hist_matching),
+                bool(repro),
+                bool(delete_extras),
+            )
+            for rec in recs
+        ]
+        return _run_parallel_futures(
+            futures,
+            desc="review_pair_norm_cache",
+            unit="scan",
+        )
+
+
 def ensure_scan_assets(
     review_dir: Union[str, Path],
     manifest_csv: Union[str, Path],
@@ -700,13 +969,11 @@ def ensure_scan_assets(
         subject_level_review_csv=subject_level_review_csv,
     )
 
-    missing_uids = sorted([uid for uid in scan_requests if uid not in meta_map])
+    missing_uids = sorted(uid for uid in scan_requests if uid not in meta_map)
     if missing_uids:
         raise ValueError(
             f"scan_uids referenced in review tables not found in manifest: {missing_uids[:10]}"
         )
-
-    fail_csv = review_dir / "scan_asset_failures.csv"
 
     recs: List[Dict[str, str]] = []
     for scan_uid, rel_png in sorted(scan_requests.items()):
@@ -721,58 +988,35 @@ def ensure_scan_assets(
             }
         )
 
-    failures_all: List[Dict[str, str]] = []
-    ok_total = 0
-
-    def _worker(rec: Dict[str, str]) -> Tuple[int, List[Dict[str, str]]]:
-        failures: List[Dict[str, str]] = []
-        ok = 0
-        try:
-            norm_path = _build_review_norm_cache(
-                resolved_path=Path(rec["resolved_path"]),
-                atlas_image=atlas_image,
-                out_norm_path=Path(rec["norm_path"]),
-                work_dir=Path(rec["work_dir"]),
-                winsor=winsor,
-                hist_matching=hist_matching,
-                repro=repro,
-                delete_extras=delete_extras,
+    with ProcessPoolExecutor(
+        max_workers=int(workers),
+        mp_context=get_context("spawn"),
+    ) as ex:
+        futures = [
+            ex.submit(
+                _scan_asset_worker,
+                rec,
+                str(atlas_image),
+                bool(overwrite),
+                winsor,
+                bool(hist_matching),
+                bool(repro),
+                bool(delete_extras),
             )
-            render_scan_png(
-                norm_path=norm_path,
-                out_path=Path(rec["png_path"]),
-                overwrite=overwrite,
-            )
-            ok = 1
-        except Exception as e:
-            failures.append(
-                {
-                    "scan_uid": rec["scan_uid"],
-                    "resolved_path": rec["resolved_path"],
-                    "png_path": rec["png_path"],
-                    "error": str(e),
-                }
-            )
-        return ok, failures
-
-    with ProcessPoolExecutor(max_workers=int(workers)) as ex:
-        futs = [ex.submit(_worker, rec) for rec in recs]
-        for fut in tqdm(
-            as_completed(futs),
-            total=len(futs),
+            for rec in recs
+        ]
+        ok_total = _run_parallel_futures(
+            futures,
             desc="review_scan_assets",
             unit="scan",
-        ):
-            ok, fails = fut.result()
-            ok_total += int(ok)
-            if fails:
-                failures_all.extend(fails)
+        )
 
-    pd.DataFrame(failures_all).to_csv(fail_csv, index=False)
+    fail_csv = review_dir / "scan_asset_failures.csv"
+    _write_empty_failure_csv(fail_csv, SCAN_FAIL_COLS)
 
     print("[REVIEW ASSETS] scan assets done")
     print(f"[REVIEW ASSETS] scans ok: {ok_total}/{len(recs)}")
-    print(f"[REVIEW ASSETS] scan failures: {len(failures_all)} -> {fail_csv}")
+    print(f"[REVIEW ASSETS] scan failures: 0 -> {fail_csv}")
 
     return review_dir / "assets" / "png", fail_csv
 
@@ -790,6 +1034,7 @@ def ensure_pair_assets(
     hist_matching: bool = False,
     repro: bool = False,
     delete_extras: bool = True,
+    diff_max: float = DEFAULT_DIFF_MAX,
 ) -> Tuple[Path, Path]:
     review_dir = Path(review_dir).expanduser().resolve()
     manifest_csv = Path(manifest_csv).expanduser().resolve()
@@ -803,6 +1048,7 @@ def ensure_pair_assets(
 
     a = str(scan_uid_a).strip()
     b = str(scan_uid_b).strip()
+
     if a not in meta_map:
         raise ValueError(f"scan_uid not found in manifest: {a}")
     if b not in meta_map:
@@ -827,6 +1073,7 @@ def ensure_pair_assets(
         hist_matching=hist_matching,
         repro=repro,
         delete_extras=delete_extras,
+        overwrite=overwrite,
     )
     norm_b = _build_review_norm_cache(
         resolved_path=Path(meta_b["resolved_path"]),
@@ -837,6 +1084,7 @@ def ensure_pair_assets(
         hist_matching=hist_matching,
         repro=repro,
         delete_extras=delete_extras,
+        overwrite=overwrite,
     )
 
     diff_out = (review_dir / diff_rel_path).resolve()
@@ -848,6 +1096,7 @@ def ensure_pair_assets(
         out_path=diff_out,
         kind="diff",
         overwrite=overwrite,
+        diff_max=diff_max,
     )
     render_pair_png(
         norm_path_a=norm_a,
@@ -855,6 +1104,7 @@ def ensure_pair_assets(
         out_path=cb_out,
         kind="checkerboard",
         overwrite=overwrite,
+        diff_max=diff_max,
     )
 
     return diff_out, cb_out
@@ -872,10 +1122,14 @@ def precompute_pair_assets(
     hist_matching: bool = False,
     repro: bool = False,
     delete_extras: bool = True,
+    diff_max: float = DEFAULT_DIFF_MAX,
 ) -> Tuple[Path, Path]:
     review_dir = Path(review_dir).expanduser().resolve()
     manifest_csv = Path(manifest_csv).expanduser().resolve()
     atlas_image = Path(atlas_image).expanduser().resolve()
+
+    if not atlas_image.exists():
+        raise FileNotFoundError(f"atlas image not found: {atlas_image}")
 
     manifest_df = _read_manifest(manifest_csv)
     meta_map = _manifest_meta_map(manifest_df)
@@ -886,19 +1140,30 @@ def precompute_pair_assets(
     )
 
     missing_uids = sorted(
-        [
+        {
             uid
             for rec in pair_requests.values()
             for uid in (rec["scan_uid_a"], rec["scan_uid_b"])
             if uid not in meta_map
-        ]
+        }
     )
     if missing_uids:
         raise ValueError(
             f"scan_uids referenced in pair review tables not found in manifest: {missing_uids[:10]}"
         )
 
-    fail_csv = review_dir / "pair_asset_failures.csv"
+    norm_ok_total = _precompute_pair_norm_caches(
+        review_dir=review_dir,
+        atlas_image=atlas_image,
+        meta_map=meta_map,
+        pair_requests=pair_requests,
+        workers=workers,
+        overwrite=overwrite,
+        winsor=winsor,
+        hist_matching=hist_matching,
+        repro=repro,
+        delete_extras=delete_extras,
+    )
 
     recs: List[Dict[str, str]] = []
     for pkey, rec in sorted(pair_requests.items()):
@@ -909,12 +1174,8 @@ def precompute_pair_assets(
                 "pair_key": pkey,
                 "scan_uid_a": a,
                 "scan_uid_b": b,
-                "resolved_path_a": meta_map[a]["resolved_path"],
-                "resolved_path_b": meta_map[b]["resolved_path"],
                 "norm_path_a": str(_norm_cache_path(review_dir, a)),
                 "norm_path_b": str(_norm_cache_path(review_dir, b)),
-                "work_dir_a": str(_work_dir(review_dir, a)),
-                "work_dir_b": str(_work_dir(review_dir, b)),
                 "diff_path": str((review_dir / rec["diff_path"]).resolve()),
                 "checkerboard_path": str(
                     (review_dir / rec["checkerboard_path"]).resolve()
@@ -922,78 +1183,33 @@ def precompute_pair_assets(
             }
         )
 
-    failures_all: List[Dict[str, str]] = []
-    ok_total = 0
-
-    def _worker(rec: Dict[str, str]) -> Tuple[int, List[Dict[str, str]]]:
-        failures: List[Dict[str, str]] = []
-        ok = 0
-        try:
-            norm_a = _build_review_norm_cache(
-                resolved_path=Path(rec["resolved_path_a"]),
-                atlas_image=atlas_image,
-                out_norm_path=Path(rec["norm_path_a"]),
-                work_dir=Path(rec["work_dir_a"]),
-                winsor=winsor,
-                hist_matching=hist_matching,
-                repro=repro,
-                delete_extras=delete_extras,
+    with ProcessPoolExecutor(
+        max_workers=int(workers),
+        mp_context=get_context("spawn"),
+    ) as ex:
+        futures = [
+            ex.submit(
+                _pair_asset_worker,
+                rec,
+                bool(overwrite),
+                float(diff_max),
             )
-            norm_b = _build_review_norm_cache(
-                resolved_path=Path(rec["resolved_path_b"]),
-                atlas_image=atlas_image,
-                out_norm_path=Path(rec["norm_path_b"]),
-                work_dir=Path(rec["work_dir_b"]),
-                winsor=winsor,
-                hist_matching=hist_matching,
-                repro=repro,
-                delete_extras=delete_extras,
-            )
-
-            render_pair_png(
-                norm_path_a=norm_a,
-                norm_path_b=norm_b,
-                out_path=Path(rec["diff_path"]),
-                kind="diff",
-                overwrite=overwrite,
-            )
-            render_pair_png(
-                norm_path_a=norm_a,
-                norm_path_b=norm_b,
-                out_path=Path(rec["checkerboard_path"]),
-                kind="checkerboard",
-                overwrite=overwrite,
-            )
-            ok = 1
-        except Exception as e:
-            failures.append(
-                {
-                    "pair_key": rec["pair_key"],
-                    "scan_uid_a": rec["scan_uid_a"],
-                    "scan_uid_b": rec["scan_uid_b"],
-                    "error": str(e),
-                }
-            )
-        return ok, failures
-
-    with ProcessPoolExecutor(max_workers=int(workers)) as ex:
-        futs = [ex.submit(_worker, rec) for rec in recs]
-        for fut in tqdm(
-            as_completed(futs),
-            total=len(futs),
+            for rec in recs
+        ]
+        ok_total = _run_parallel_futures(
+            futures,
             desc="review_pair_assets",
             unit="pair",
-        ):
-            ok, fails = fut.result()
-            ok_total += int(ok)
-            if fails:
-                failures_all.extend(fails)
+        )
 
-    pd.DataFrame(failures_all).to_csv(fail_csv, index=False)
+    fail_csv = review_dir / "pair_asset_failures.csv"
+    _write_empty_failure_csv(fail_csv, PAIR_FAIL_COLS)
 
+    print("[REVIEW ASSETS] pair norm caches done")
+    print(f"[REVIEW ASSETS] pair norm caches ok: {norm_ok_total}")
     print("[REVIEW ASSETS] pair assets done")
     print(f"[REVIEW ASSETS] pairs ok: {ok_total}/{len(recs)}")
-    print(f"[REVIEW ASSETS] pair failures: {len(failures_all)} -> {fail_csv}")
+    print(f"[REVIEW ASSETS] pair failures: 0 -> {fail_csv}")
 
     return review_dir / "assets" / "diff", review_dir / "assets" / "checkerboard"
 
@@ -1010,32 +1226,23 @@ def build_review_assets(
     hist_matching: bool = False,
     repro: bool = False,
     delete_extras: bool = True,
+    diff_max: float = DEFAULT_DIFF_MAX,
+    cleanup_cache: bool = True,
 ) -> None:
+    review_dir = Path(review_dir).expanduser().resolve()
+
     atlas_image = (
         Path(__file__).resolve().parents[2]
         / "resources"
         / "mni_1mm3_t1_brain_atlas.nii.gz"
     )
+
     mode = str(mode).strip().lower()
     if mode not in {"lazy", "precompute"}:
         raise ValueError("mode must be 'lazy' or 'precompute'")
 
-    ensure_scan_assets(
-        review_dir=review_dir,
-        manifest_csv=manifest_csv,
-        atlas_image=atlas_image,
-        scan_level_review_csv=scan_level_review_csv,
-        subject_level_review_csv=subject_level_review_csv,
-        workers=workers,
-        overwrite=overwrite,
-        winsor=winsor,
-        hist_matching=hist_matching,
-        repro=repro,
-        delete_extras=delete_extras,
-    )
-
-    if mode == "precompute":
-        precompute_pair_assets(
+    try:
+        ensure_scan_assets(
             review_dir=review_dir,
             manifest_csv=manifest_csv,
             atlas_image=atlas_image,
@@ -1049,4 +1256,25 @@ def build_review_assets(
             delete_extras=delete_extras,
         )
 
-    print(f"[REVIEW ASSETS] mode={mode} done")
+        if mode == "precompute":
+            precompute_pair_assets(
+                review_dir=review_dir,
+                manifest_csv=manifest_csv,
+                atlas_image=atlas_image,
+                scan_level_review_csv=scan_level_review_csv,
+                subject_level_review_csv=subject_level_review_csv,
+                workers=workers,
+                overwrite=overwrite,
+                winsor=winsor,
+                hist_matching=hist_matching,
+                repro=repro,
+                delete_extras=delete_extras,
+                diff_max=diff_max,
+            )
+
+        print(f"[REVIEW ASSETS] mode={mode} done")
+
+    finally:
+        if cleanup_cache:
+            clear_review_cache(review_dir)
+            print(f"[REVIEW ASSETS] cache cleared: {review_dir / 'cache'}")

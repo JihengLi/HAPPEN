@@ -187,6 +187,10 @@ def run_faiss_retrieval(
             query_row = start + local_i
             qmeta = manifest_df.iloc[query_row]
 
+            q_dataset = str(qmeta["dataset"])
+            q_subject_id = str(qmeta["subject_id"])
+            q_subject_key = (q_dataset, q_subject_id)
+
             rank = 0
             for sim, nn_idx in zip(sims[local_i], inds[local_i]):
                 if nn_idx < 0:
@@ -194,11 +198,15 @@ def run_faiss_retrieval(
                 if int(nn_idx) == int(query_row):
                     continue
 
+                cmeta = manifest_df.iloc[int(nn_idx)]
+                c_subject_key = (str(cmeta["dataset"]), str(cmeta["subject_id"]))
+
+                if c_subject_key == q_subject_key:
+                    continue
+
                 rank += 1
                 if rank > int(topk):
                     break
-
-                cmeta = manifest_df.iloc[int(nn_idx)]
 
                 rows.append(
                     {
