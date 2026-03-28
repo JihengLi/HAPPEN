@@ -308,7 +308,7 @@ def normalize_state_dict_keys(
 def load_model(
     device: Optional[torch.device] = None,
 ) -> nn.Module:
-    model_pth = Path(__file__).resolve().parents[2] / "resources" / "model.pth"
+    model_pth = Path(__file__).resolve().parents[3] / "resources" / "model.pth"
 
     if device is None:
         device = choose_device("auto")

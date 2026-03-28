@@ -331,7 +331,7 @@ def preprocess_resolved_path_2p5d(
 ) -> np.ndarray:
     resolved_path = Path(resolved_path).expanduser().resolve()
     atlas_image = (
-        Path(__file__).resolve().parents[2]
+        Path(__file__).resolve().parents[3]
         / "resources"
         / "mni_1mm3_t1_brain_atlas.nii.gz"
     )

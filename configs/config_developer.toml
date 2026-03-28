@@ -5,7 +5,7 @@ profile_runtime = true
 
 [exact]
 root = ""
-candidates_csv = "/nfs/ForHenry/mri_dedup/supercl/data/test/deployment_20k.csv"
+candidates_csv = ""
 valid_csv = ""
 modality = "T1w"
 thread_workers = 64

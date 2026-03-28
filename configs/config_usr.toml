@@ -1,7 +1,7 @@
 [run]
 out = ""
 stages = ["exact", "near"]
-profile_runtime = false
+profile_runtime = true
 
 [exact]
 root = ""
@@ -27,9 +27,9 @@ nprobe = 64
 train_size = 200000
 seed = 0
 overwrite_retrieval = false
-min_similarity = 0.90
+min_similarity = 0.92
 
-review_mode = "precompute"   # off | lazy | precompute
+review_mode = "lazy"   # off | lazy | precompute
 review_workers = 32
 overwrite_review_assets = false
 max_scan_candidates_per_query = 100

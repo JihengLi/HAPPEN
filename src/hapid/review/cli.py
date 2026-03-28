@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import logging
 import tomllib
 
@@ -160,17 +159,9 @@ def run_review_app(cfg: ReviewConfig) -> int:
     return 0
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Run review app.")
-    ap.add_argument(
-        "config",
-        type=Path,
-        help="Path to review config TOML file",
-    )
-    args = ap.parse_args()
-
+def run_review_main(config_path: Union[str, Path]) -> int:
     try:
-        cfg = _build_review_config(args.config)
+        cfg = _build_review_config(config_path)
     except Exception as e:
         print(f"[REVIEW][ERROR] {e}")
         return 2

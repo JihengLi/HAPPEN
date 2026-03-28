@@ -6,7 +6,6 @@ Email: jiheng.li.1@vanderbilt.edu
 from __future__ import annotations
 
 import hashlib
-import numpy as np
 import pandas as pd
 
 from pathlib import Path

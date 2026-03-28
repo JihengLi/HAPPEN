@@ -1,0 +1,27 @@
+[project]
+name = "hapid"
+version = "0.1.0"
+description = "Human-in-the-loop Auditing Pipeline for Identity Duplication in MRI Repositories."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "deepbet>=1.0.2",
+    "faiss-cpu>=1.13.2",
+    "flask>=3.1.3",
+    "matplotlib>=3.10.8",
+    "nibabel>=5.4.2",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "pillow>=12.1.1",
+    "plotly>=6.6.0",
+    "scikit-learn>=1.8.0",
+    "torch>=2.11.0",
+    "tqdm>=4.67.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+hapid = "hapid:main"
