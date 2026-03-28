@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import re
-import pandas as pd
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from store import DecisionStore
+import pandas as pd
+
+from .store import DecisionStore
+
+
+_CANDIDATE_SLOT_RE = re.compile(r"^candidate_(\d+)_")
 
 
 def _norm_str(x: Any) -> str:
@@ -21,10 +26,6 @@ def _norm_str(x: Any) -> str:
     if s.lower() in {"nan", "none", "null", "na", "n/a"}:
         return ""
     return s
-
-
-def _norm_scan_uid(x: Any) -> str:
-    return _norm_str(x)
 
 
 def _get_first_present(row: Dict[str, Any], keys: Sequence[str]) -> str:
@@ -45,7 +46,9 @@ class ScanRef:
     src_path: str
 
     def is_renderable(self) -> bool:
-        return bool(self.dataset and self.subject_id and self.scan_uid)
+        return bool(
+            self.dataset and self.subject_id and self.scan_uid and self.src_path
+        )
 
     def scan_folder_parts(self) -> Tuple[str, ...]:
         if self.session_id:
@@ -74,27 +77,35 @@ class QueryRecord:
         return self.query.subject_id
 
 
-def load_in_csv(csv_path: str | pd.PathLike) -> pd.DataFrame:
+def load_in_csv(csv_path: str | Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path, dtype=str, na_filter=True)
-    df.columns = [c.strip() for c in df.columns]
+    df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
 def detect_candidate_slots(df: pd.DataFrame) -> List[int]:
     slots = set()
     for col in df.columns:
-        m = re.compile(r"^candidate_(\d+)_").match(col)
+        m = _CANDIDATE_SLOT_RE.match(str(col).strip())
         if m:
             slots.add(int(m.group(1)))
     return sorted(slots)
 
 
 def _parse_scanref_from_row(row: Dict[str, Any], prefix: str) -> ScanRef:
-    dataset = _norm_str(row.get(f"{prefix}dataset"))
-    subject_id = _norm_str(row.get(f"{prefix}subject_id"))
-    session_id = _norm_str(row.get(f"{prefix}session_id"))
-    scan_uid = _norm_scan_uid(row.get(f"{prefix}scan_uid"))
-    src_path = _norm_str(row.get(f"{prefix}path"))
+    dataset = _get_first_present(row, [f"{prefix}dataset"])
+    subject_id = _get_first_present(row, [f"{prefix}subject_id"])
+    session_id = _get_first_present(row, [f"{prefix}session_id"])
+    scan_uid = _get_first_present(row, [f"{prefix}scan_uid", f"{prefix}scan"])
+    src_path = _get_first_present(
+        row,
+        [
+            f"{prefix}src_path",
+            f"{prefix}path",
+            f"{prefix}resolved_path",
+        ],
+    )
+
     return ScanRef(
         dataset=dataset,
         subject_id=subject_id,
@@ -107,7 +118,12 @@ def _parse_scanref_from_row(row: Dict[str, Any], prefix: str) -> ScanRef:
 def _parse_similarity(row: Dict[str, Any], slot: int) -> Optional[float]:
     prefix = f"candidate_{slot}_"
     s = _get_first_present(
-        row, [f"{prefix}similarity", f"{prefix}sim", f"{prefix}score"]
+        row,
+        [
+            f"{prefix}similarity",
+            f"{prefix}sim",
+            f"{prefix}score",
+        ],
     )
     if not s:
         return None
@@ -122,25 +138,34 @@ def parse_queries(df: pd.DataFrame, slots: Sequence[int]) -> List[QueryRecord]:
     out: List[QueryRecord] = []
 
     for i, row in enumerate(records):
-        q = _parse_scanref_from_row(row, "query_")
-        if not q.is_renderable():
+        query = _parse_scanref_from_row(row, "query_")
+        if not query.is_renderable():
             continue
 
-        cands: List[CandidateRef] = []
-        for k in slots:
-            cand_prefix = f"candidate_{k}_"
-            c = _parse_scanref_from_row(row, cand_prefix)
-
-            if not c.is_renderable():
+        candidates: List[CandidateRef] = []
+        for slot in slots:
+            candidate = _parse_scanref_from_row(row, f"candidate_{slot}_")
+            if not candidate.is_renderable():
                 continue
 
-            sim = _parse_similarity(row, k)
-            cands.append(CandidateRef(scanref=c, similarity=sim))
+            similarity = _parse_similarity(row, slot)
+            candidates.append(
+                CandidateRef(
+                    scanref=candidate,
+                    similarity=similarity,
+                )
+            )
 
-        if not cands:
+        if not candidates:
             continue
 
-        out.append(QueryRecord(query=q, candidates=tuple(cands), row_id=i))
+        out.append(
+            QueryRecord(
+                query=query,
+                candidates=tuple(candidates),
+                row_id=i,
+            )
+        )
 
     return out
 
@@ -150,28 +175,42 @@ def build_index(
 ) -> Dict[str, Dict[str, List[QueryRecord]]]:
     index: Dict[str, Dict[str, List[QueryRecord]]] = {}
     for qr in queries:
-        ds = qr.dataset
-        sbj = qr.subject_id
-        if not ds or not sbj:
+        dataset = qr.dataset
+        subject_id = qr.subject_id
+        if not dataset or not subject_id:
             continue
-        index.setdefault(ds, {}).setdefault(sbj, []).append(qr)
+        index.setdefault(dataset, {}).setdefault(subject_id, []).append(qr)
     return index
+
+
+def _scan_item_key(scan: ScanRef) -> str:
+    return DecisionStore.make_item_key(
+        dataset=scan.dataset,
+        subject_id=scan.subject_id,
+        session_id=scan.session_id,
+        scan_uid=scan.scan_uid,
+        src_path=scan.src_path,
+    )
 
 
 def dedup_undirected_pairs(queries: Sequence[QueryRecord]) -> List[QueryRecord]:
     occ: Dict[Tuple[str, str], List[Tuple[int, int, float, bool]]] = {}
+
     for qi, qr in enumerate(queries):
-        a_uid = qr.query.scan_uid
+        a_key = _scan_item_key(qr.query)
+
         for ci, cand in enumerate(qr.candidates):
-            b_uid = cand.scanref.scan_uid
-            k = (a_uid, b_uid) if a_uid <= b_uid else (b_uid, a_uid)
-            sim = cand.similarity
-            simv = float(sim) if (sim is not None) else float("-inf")
-            is_canon = a_uid <= b_uid
-            occ.setdefault(k, []).append((qi, ci, simv, is_canon))
+            b_key = _scan_item_key(cand.scanref)
+
+            pair_key = (a_key, b_key) if a_key <= b_key else (b_key, a_key)
+            similarity = cand.similarity
+            sim_val = float(similarity) if similarity is not None else float("-inf")
+            is_canon = a_key <= b_key
+
+            occ.setdefault(pair_key, []).append((qi, ci, sim_val, is_canon))
 
     keep_pairs = set()
-    for k, items in occ.items():
+    for items in occ.values():
         if len(items) == 1:
             qi, ci, _, _ = items[0]
             keep_pairs.add((qi, ci))
@@ -186,39 +225,27 @@ def dedup_undirected_pairs(queries: Sequence[QueryRecord]) -> List[QueryRecord]:
 
     out: List[QueryRecord] = []
     for qi, qr in enumerate(queries):
-        new_cands = [c for ci, c in enumerate(qr.candidates) if (qi, ci) in keep_pairs]
-        if new_cands:
+        new_candidates = [
+            cand for ci, cand in enumerate(qr.candidates) if (qi, ci) in keep_pairs
+        ]
+        if new_candidates:
             out.append(
                 QueryRecord(
-                    query=qr.query, candidates=tuple(new_cands), row_id=qr.row_id
+                    query=qr.query,
+                    candidates=tuple(new_candidates),
+                    row_id=qr.row_id,
                 )
             )
+
     return out
 
 
 def collect_valid_item_keys(queries: Sequence[QueryRecord]) -> set[str]:
     valid = set()
 
-    for q in queries:
-        qref = q.query
-        qk = DecisionStore.make_item_key(
-            dataset=qref.dataset,
-            subject_id=qref.subject_id,
-            session_id=qref.session_id,
-            scan_uid=qref.scan_uid,
-            src_path=qref.src_path,
-        )
-        valid.add(qk)
-
-        for c in q.candidates:
-            cref = c.scanref
-            ck = DecisionStore.make_item_key(
-                dataset=cref.dataset,
-                subject_id=cref.subject_id,
-                session_id=cref.session_id,
-                scan_uid=cref.scan_uid,
-                src_path=cref.src_path,
-            )
-            valid.add(ck)
+    for qr in queries:
+        valid.add(_scan_item_key(qr.query))
+        for cand in qr.candidates:
+            valid.add(_scan_item_key(cand.scanref))
 
     return valid

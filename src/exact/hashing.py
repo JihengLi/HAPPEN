@@ -21,6 +21,21 @@ from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 
 
+def _write_empty_duplicates_csv(out_csv: Path, key_col: str) -> None:
+    cols_out = [
+        "group_id",
+        key_col,
+        "modality",
+        "dataset",
+        "subject_id",
+        "session_id",
+        "candidate",
+        "resolved_path",
+    ]
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(columns=cols_out).to_csv(out_csv, index=False)
+
+
 def sha256_bytes(data: bytes) -> str:
     h = hashlib.sha256()
     h.update(data)
@@ -124,9 +139,10 @@ def run_hash_pipeline(
     batch_buf: list[dict] = []
     inflight = deque()
 
-    with ProcessPoolExecutor(max_workers=process_workers) as ex, tqdm(
-        total=len(files), desc="Hashing", unit="file"
-    ) as pbar:
+    with (
+        ProcessPoolExecutor(max_workers=process_workers) as ex,
+        tqdm(total=len(files), desc="Hashing", unit="file") as pbar,
+    ):
         it = iter(files)
 
         while len(inflight) < max_inflight:
@@ -247,8 +263,10 @@ def group_and_organize_duplicates(
         for k, c in vc.items():
             if pd.notna(k):
                 counts[k] = counts.get(k, 0) + int(c)
+
     dup_keys = sorted([k for k, c in counts.items() if c > 1])
     if not dup_keys:
+        _write_empty_duplicates_csv(out_csv, key_col)
         return False
 
     gid_map = {k: i + 1 for i, k in enumerate(dup_keys)}
@@ -258,9 +276,7 @@ def group_and_organize_duplicates(
 
     EXCLUDED_DIRS = {"derivatives"}
 
-    def _is_in_excluded_dirs(
-        p: Union[str, Path],
-    ) -> bool:
+    def _is_in_excluded_dirs(p: Union[str, Path]) -> bool:
         try:
             parts = Path(str(p)).parts
         except Exception:
@@ -292,12 +308,16 @@ def group_and_organize_duplicates(
         "candidate",
         "resolved_path",
     ]
+
+    wrote_any = False
+
     for chunk in pd.read_csv(
         hash_csv, usecols=["resolved_path", key_col], chunksize=chunksize, dtype=str
     ):
         sub = chunk[chunk[key_col].isin(dup_keys)].copy()
         if sub.empty:
             continue
+
         sub["group_id"] = sub[key_col].map(_gid)
         sub = sub.merge(
             m,
@@ -305,21 +325,29 @@ def group_and_organize_duplicates(
             how="left",
             suffixes=("", "_meta"),
         )
+
         for c in ["candidate", "dataset", "subject_id", "session_id"]:
             if c in sub.columns:
                 sub[c] = sub[c].fillna("").astype(str)
+
         sub = sub[~sub["candidate"].apply(_is_in_excluded_dirs)]
         if sub.empty:
             continue
+
         sub["modality"] = modality
         sub = sub[cols_out]
         sub.to_csv(out_csv, mode="a", header=first, index=False)
         first = False
-    if not out_csv.exists() or out_csv.stat().st_size == 0:
+        wrote_any = True
+
+    if not wrote_any:
+        _write_empty_duplicates_csv(out_csv, key_col)
         return False
+
     if final_sort_keys:
         df = pd.read_csv(out_csv, dtype=str)
         df.sort_values(list(final_sort_keys), ascending=True, kind="mergesort").to_csv(
             out_csv, index=False
         )
+
     return True

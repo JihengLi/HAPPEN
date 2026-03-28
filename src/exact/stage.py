@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,7 @@ from ..report import (
     report_by_category_across_datasets,
     visualize_file_matrix,
 )
+from ..utils.runtime_profile import RuntimeProfiler
 
 
 @dataclass
@@ -181,6 +183,8 @@ def run_exact_stage(
     out: str = "./data",
     thread_workers: int = 4,
     process_workers: int = 4,
+    verify: bool = False,
+    profiler: Optional[RuntimeProfiler] = None,
 ) -> ExactStageArtifacts:
     out_dir = Path(out).expanduser().resolve()
     exact_dir = out_dir / "exact"
@@ -196,89 +200,169 @@ def run_exact_stage(
     candidates_csv_path: Optional[Path] = None
     hash_errors_csv: Optional[Path] = None
 
-    if valid_csv:
-        valid_csv_path = Path(valid_csv).expanduser().resolve()
-        files = _load_valid_csv(valid_csv_path)
-        if not files:
-            print(f"[WARN] No paths in --valid_csv: {valid_csv}")
-            raise SystemExit(0)
-        print(
-            f"[RESUME] Loaded {len(files)} valid paths from {valid_csv}. Skipping classification."
-        )
-    else:
-        candidates_df = _build_or_load_candidates(
-            root=root,
-            candidates_csv=candidates_csv,
+    load_verify_ctx = (
+        profiler.stage(
+            "exact_load_verify",
             modality=modality,
-        )
-        candidates_csv_path = exact_dir / "candidates.csv"
-        files, valid_csv_path = _classify_and_write(
-            candidates_df=candidates_df,
-            exact_dir=exact_dir,
             thread_workers=thread_workers,
+            input_mode=(
+                "valid_csv"
+                if valid_csv
+                else "candidates_csv" if candidates_csv else "root"
+            ),
+            root=root or "",
+            candidates_csv=candidates_csv or "",
+            valid_csv=valid_csv or "",
         )
-        if not files:
-            print("No files found after classification; aborting hashing/dedup.")
-            raise SystemExit(0)
-
-    hash_csv, errors = run_hash_pipeline_chunked(
-        files=files,
-        process_workers=max(1, process_workers),
-        out_path=exact_dir / f"{modality}_hashes.csv",
-        chunk_size=8000,
-        batch_size=1000,
-        inflight_factor=2,
+        if profiler is not None
+        else nullcontext()
     )
 
-    if errors:
-        hash_errors_csv = exact_dir / "hash_errors.csv"
-        pd.DataFrame(errors).to_csv(hash_errors_csv, index=False)
-        print(f"[WARN] {len(errors)} files failed to hash. See {hash_errors_csv}")
+    with load_verify_ctx:
+        if valid_csv:
+            valid_csv_path = Path(valid_csv).expanduser().resolve()
+            files = _load_valid_csv(valid_csv_path)
+            if not files:
+                print(f"[WARN] No paths in --valid_csv: {valid_csv}")
+                raise SystemExit(0)
+            print(
+                f"[RESUME] Loaded {len(files)} valid paths from {valid_csv}. Skipping classification."
+            )
+        else:
+            candidates_df = _build_or_load_candidates(
+                root=root,
+                candidates_csv=candidates_csv,
+                modality=modality,
+            )
+            candidates_csv_path = exact_dir / "candidates.csv"
+            files, valid_csv_path = _classify_and_write(
+                candidates_df=candidates_df,
+                exact_dir=exact_dir,
+                thread_workers=thread_workers,
+            )
+            if not files:
+                print("No files found after classification; aborting hashing/dedup.")
+                raise SystemExit(0)
 
-    duplicates_csv = exact_dir / "duplicates.csv"
-
-    group_and_organize_duplicates(
-        hash_csv,
-        "can_hash",
-        modality,
-        valid_csv_path,
-        duplicates_csv,
+    hash_group_ctx = (
+        profiler.stage(
+            "exact_hash_group",
+            n_input=len(files),
+            modality=modality,
+            process_workers=process_workers,
+            chunk_size=8000,
+            batch_size=1000,
+            inflight_factor=2,
+        )
+        if profiler is not None
+        else nullcontext()
     )
 
-    visualize_file_matrix(
-        duplicates_csv,
-        figures_dir,
-        modality,
-        process_workers,
+    with hash_group_ctx:
+        hash_csv, errors = run_hash_pipeline_chunked(
+            files=files,
+            process_workers=max(1, process_workers),
+            out_path=exact_dir / f"{modality}_hashes.csv",
+            chunk_size=8000,
+            batch_size=1000,
+            inflight_factor=2,
+        )
+
+        if errors:
+            hash_errors_csv = exact_dir / "hash_errors.csv"
+            pd.DataFrame(errors).to_csv(hash_errors_csv, index=False)
+            print(f"[WARN] {len(errors)} files failed to hash. See {hash_errors_csv}")
+
+        duplicates_csv = exact_dir / "duplicates.csv"
+
+        has_duplicates = group_and_organize_duplicates(
+            hash_csv,
+            "can_hash",
+            modality,
+            valid_csv_path,
+            duplicates_csv,
+        )
+
+        if not has_duplicates:
+            by_dataset_dir.mkdir(parents=True, exist_ok=True)
+            by_category_dir.mkdir(parents=True, exist_ok=True)
+            by_category_stats_dir.mkdir(parents=True, exist_ok=True)
+            verified_dir.mkdir(parents=True, exist_ok=True)
+            figures_dir.mkdir(parents=True, exist_ok=True)
+
+            print("[EXACT] No exact duplicates found.")
+            print(f"[EXACT] Wrote empty duplicates file -> {duplicates_csv}")
+            print(
+                "[EXACT] Skipping exact reporting/verification and continuing pipeline."
+            )
+
+            return ExactStageArtifacts(
+                out_dir=out_dir,
+                exact_dir=exact_dir,
+                candidates_csv=candidates_csv_path,
+                valid_csv=Path(valid_csv_path),
+                hash_csv=Path(hash_csv),
+                hash_errors_csv=hash_errors_csv,
+                duplicates_csv=duplicates_csv,
+                by_dataset_dir=by_dataset_dir,
+                by_category_dir=by_category_dir,
+                by_category_stats_dir=by_category_stats_dir,
+                verified_dir=verified_dir,
+                figures_dir=figures_dir,
+            )
+
+    categorize_ctx = (
+        profiler.stage(
+            "exact_categorize",
+            modality=modality,
+            process_workers=process_workers,
+            thread_workers=thread_workers,
+            verify_enabled=verify,
+            exclude_verify_categories="SAME_BYTES" if verify else "",
+        )
+        if profiler is not None
+        else nullcontext()
     )
 
-    report_by_dataset(
-        duplicates_csv,
-        by_dataset_dir,
-        modality,
-    )
+    with categorize_ctx:
+        visualize_file_matrix(
+            duplicates_csv,
+            figures_dir,
+            modality,
+            process_workers,
+        )
 
-    report_by_category(
-        by_dataset_dir,
-        by_category_dir,
-        by_category_stats_dir,
-        modality,
-    )
+        report_by_dataset(
+            duplicates_csv,
+            by_dataset_dir,
+            modality,
+        )
 
-    report_by_category_across_datasets(
-        duplicates_csv,
-        by_category_dir,
-        by_category_stats_dir,
-        modality,
-    )
+        report_by_category(
+            by_dataset_dir,
+            by_category_dir,
+            by_category_stats_dir,
+            modality,
+        )
 
-    verify_all_categories(
-        by_category_dir,
-        verified_dir,
-        thread_workers,
-        process_workers,
-        exclude_categories={"SAME_BYTES"},
-    )
+        report_by_category_across_datasets(
+            duplicates_csv,
+            by_category_dir,
+            by_category_stats_dir,
+            modality,
+        )
+
+        if verify:
+            verify_all_categories(
+                by_category_dir,
+                verified_dir,
+                thread_workers,
+                process_workers,
+                exclude_categories={"SAME_BYTES"},
+            )
+        else:
+            verified_dir.mkdir(parents=True, exist_ok=True)
+            print("[EXACT] Verification skipped (verify=false).")
 
     print("[EXACT] Done.")
     print(f"[EXACT] outputs saved under -> {exact_dir}")

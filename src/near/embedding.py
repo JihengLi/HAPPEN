@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
+import resource
+
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from contextlib import nullcontext
 from multiprocessing import get_context
@@ -26,6 +29,7 @@ from tqdm import tqdm
 
 from .model import choose_device, load_model
 from .preprocessing import preprocess_resolved_path_2p5d
+from ..utils.runtime_profile import RuntimeProfiler
 
 
 def clean_str(x: Any) -> str:
@@ -76,6 +80,25 @@ def _safe_rmtree(path: Union[str, Path]) -> None:
         shutil.rmtree(path, ignore_errors=True)
     except Exception:
         pass
+
+
+def _cpu_snapshot() -> Dict[str, float]:
+    r_self = resource.getrusage(resource.RUSAGE_SELF)
+    return {
+        "user_s": float(r_self.ru_utime),
+        "sys_s": float(r_self.ru_stime),
+    }
+
+
+def _cpu_delta(cpu0: Dict[str, float]) -> Dict[str, float]:
+    cpu1 = _cpu_snapshot()
+    user_s = float(cpu1["user_s"] - cpu0["user_s"])
+    sys_s = float(cpu1["sys_s"] - cpu0["sys_s"])
+    return {
+        "cpu_user_s": user_s,
+        "cpu_sys_s": sys_s,
+        "cpu_total_s": user_s + sys_s,
+    }
 
 
 def _read_input_csv(
@@ -258,7 +281,10 @@ def _preprocess_one_worker(
     hist_matching: bool,
     repro: bool,
     delete_extras: bool,
-) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+) -> Tuple[Optional[Dict[str, str]], Optional[str], Dict[str, float]]:
+    t0 = time.perf_counter()
+    cpu0 = _cpu_snapshot()
+
     ds = clean_str(row.get("dataset", ""))
     sbj = clean_str(row.get("subject_id", ""))
     ses = clean_str(row.get("session_id", ""))
@@ -267,7 +293,8 @@ def _preprocess_one_worker(
     scan_uid = clean_str(row.get("scan_uid", ""))
 
     if not (ds and sbj and cand and rpath and scan_uid):
-        return None, "missing required input metadata"
+        perf = {"wall_time_s": float(time.perf_counter() - t0), **_cpu_delta(cpu0)}
+        return None, "missing required input metadata", perf
 
     temp_root_p = Path(temp_root).resolve()
     temp_preproc_dir = temp_root_p / "preprocessed"
@@ -304,10 +331,35 @@ def _preprocess_one_worker(
             "scan_uid": scan_uid,
             "temp_tensor_path": str(temp_tensor_path),
         }
-        return meta, None
+        perf = {"wall_time_s": float(time.perf_counter() - t0), **_cpu_delta(cpu0)}
+        return meta, None, perf
 
     except Exception as e:
-        return None, str(e)
+        perf = {"wall_time_s": float(time.perf_counter() - t0), **_cpu_delta(cpu0)}
+        return None, str(e), perf
+
+
+def _timed_encode_batch(
+    model: nn.Module,
+    batch_x: torch.Tensor,
+    device: torch.device,
+    use_amp: bool,
+    profiler: Optional[RuntimeProfiler],
+) -> Tuple[np.ndarray, float]:
+    if device.type == "cuda":
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        Z = encode_batch(model, batch_x, device=device, use_amp=use_amp)
+        end.record()
+        end.synchronize()
+        gpu_time_s = float(start.elapsed_time(end)) / 1000.0
+        if profiler is not None:
+            profiler.add_gpu_time("near_embedding", gpu_time_s)
+        return Z, gpu_time_s
+
+    Z = encode_batch(model, batch_x, device=device, use_amp=use_amp)
+    return Z, 0.0
 
 
 def _flush_embedding_buffer(
@@ -319,16 +371,27 @@ def _flush_embedding_buffer(
     normalize: bool,
     partial_emb_dir: Path,
     failures: List[Dict[str, str]],
+    profiler: Optional[RuntimeProfiler],
+    detail_stats: Dict[str, float],
 ) -> int:
     if not buf_x:
         return 0
 
     partial_emb_dir.mkdir(parents=True, exist_ok=True)
     n_written = 0
+    flush_t0 = time.perf_counter()
+    detail_stats["num_flushes"] += 1.0
 
     try:
         X = torch.stack(buf_x, dim=0)
-        Z = encode_batch(model, X, device=device, use_amp=use_amp)
+        Z, gpu_time_s = _timed_encode_batch(
+            model=model,
+            batch_x=X,
+            device=device,
+            use_amp=use_amp,
+            profiler=profiler,
+        )
+        detail_stats["inference_gpu_time_s"] += gpu_time_s
 
         for z, meta in zip(Z, buf_meta):
             try:
@@ -364,11 +427,21 @@ def _flush_embedding_buffer(
         tqdm.write(
             f"[WARN] batch inference failed; fallback to per-scan. error={batch_e}"
         )
+        detail_stats["num_fallback_batches"] += 1.0
+        detail_stats["num_fallback_scans"] += float(len(buf_x))
 
         for x, meta in zip(buf_x, buf_meta):
             try:
                 X1 = x.unsqueeze(0)
-                z = encode_batch(model, X1, device=device, use_amp=use_amp)[0]
+                z1, gpu_time_s = _timed_encode_batch(
+                    model=model,
+                    batch_x=X1,
+                    device=device,
+                    use_amp=use_amp,
+                    profiler=profiler,
+                )
+                detail_stats["inference_gpu_time_s"] += gpu_time_s
+                z = z1[0]
 
                 if normalize:
                     z = l2_normalize(z)
@@ -398,6 +471,7 @@ def _flush_embedding_buffer(
                     }
                 )
 
+    detail_stats["flush_wall_s"] += float(time.perf_counter() - flush_t0)
     buf_x.clear()
     buf_meta.clear()
     return n_written
@@ -422,6 +496,7 @@ def run_embedding_inference(
     repro: bool = False,
     delete_extras: bool = True,
     inflight_factor: int = 2,
+    profiler: Optional[RuntimeProfiler] = None,
 ) -> Tuple[Path, Path, Path]:
     in_csv = Path(in_csv)
     out_dir = Path(out_dir).expanduser().resolve()
@@ -494,9 +569,11 @@ def run_embedding_inference(
         drop=True
     )
 
+    model_t0 = time.perf_counter()
     dev = choose_device(device)
     use_amp = bool(use_amp) and dev.type == "cuda"
     model = load_model(device=dev)
+    model_init_wall_s = float(time.perf_counter() - model_t0)
     emb_dim = _model_emb_dim(model)
 
     failures: List[Dict[str, str]] = []
@@ -510,11 +587,30 @@ def run_embedding_inference(
 
     records = pending_df.to_dict(orient="records")
 
+    detail_stats: Dict[str, float] = {
+        "preprocess_task_wall_sum_s": 0.0,
+        "preprocess_task_cpu_user_s": 0.0,
+        "preprocess_task_cpu_sys_s": 0.0,
+        "preprocess_task_cpu_total_s": 0.0,
+        "tensor_load_wall_s": 0.0,
+        "flush_wall_s": 0.0,
+        "inference_gpu_time_s": 0.0,
+        "num_flushes": 0.0,
+        "num_fallback_batches": 0.0,
+        "num_fallback_scans": 0.0,
+        "num_preprocess_failures": 0.0,
+        "num_tensor_load_failures": 0.0,
+        "model_init_wall_s": model_init_wall_s,
+    }
+
     try:
-        with ProcessPoolExecutor(
-            max_workers=preprocess_workers,
-            mp_context=get_context("spawn"),
-        ) as ex, tqdm(total=len(records), desc="embed_near", unit="scan") as pbar:
+        with (
+            ProcessPoolExecutor(
+                max_workers=preprocess_workers,
+                mp_context=get_context("spawn"),
+            ) as ex,
+            tqdm(total=len(records), desc="embed_near", unit="scan") as pbar,
+        ):
             rec_iter = iter(records)
             fut2row: Dict[Any, Dict[str, str]] = {}
 
@@ -551,10 +647,23 @@ def run_embedding_inference(
                 for fut in done:
                     row = fut2row.pop(fut)
 
-                    meta, err = fut.result()
+                    meta, err, perf = fut.result()
+                    detail_stats["preprocess_task_wall_sum_s"] += float(
+                        perf.get("wall_time_s", 0.0)
+                    )
+                    detail_stats["preprocess_task_cpu_user_s"] += float(
+                        perf.get("cpu_user_s", 0.0)
+                    )
+                    detail_stats["preprocess_task_cpu_sys_s"] += float(
+                        perf.get("cpu_sys_s", 0.0)
+                    )
+                    detail_stats["preprocess_task_cpu_total_s"] += float(
+                        perf.get("cpu_total_s", 0.0)
+                    )
 
                     if meta is not None:
                         try:
+                            load_t0 = time.perf_counter()
                             x_np = np.load(meta["temp_tensor_path"])
                             if x_np.ndim != 4:
                                 raise ValueError(
@@ -565,6 +674,10 @@ def run_embedding_inference(
                                     x_np.astype(np.float32, copy=False)
                                 )
                             )
+                            detail_stats["tensor_load_wall_s"] += float(
+                                time.perf_counter() - load_t0
+                            )
+
                             buf_x.append(x_t)
                             buf_meta.append(meta)
 
@@ -578,9 +691,12 @@ def run_embedding_inference(
                                     normalize=bool(normalize),
                                     partial_emb_dir=partial_emb_dir,
                                     failures=failures,
+                                    profiler=profiler,
+                                    detail_stats=detail_stats,
                                 )
 
                         except Exception as e:
+                            detail_stats["num_tensor_load_failures"] += 1.0
                             failures.append(
                                 {
                                     "dataset": clean_str(row.get("dataset", "")),
@@ -599,6 +715,7 @@ def run_embedding_inference(
                                 stop_early = True
 
                     else:
+                        detail_stats["num_preprocess_failures"] += 1.0
                         failures.append(
                             {
                                 "dataset": clean_str(row.get("dataset", "")),
@@ -636,6 +753,8 @@ def run_embedding_inference(
                 normalize=bool(normalize),
                 partial_emb_dir=partial_emb_dir,
                 failures=failures,
+                profiler=profiler,
+                detail_stats=detail_stats,
             )
 
     except KeyboardInterrupt:
@@ -652,6 +771,8 @@ def run_embedding_inference(
                 normalize=bool(normalize),
                 partial_emb_dir=partial_emb_dir,
                 failures=failures,
+                profiler=profiler,
+                detail_stats=detail_stats,
             )
         except Exception as e:
             tqdm.write(f"[ERROR] final interrupt flush failed: {e}")
@@ -769,6 +890,43 @@ def run_embedding_inference(
     atomic_write_csv(failures_df, failures_csv)
 
     _safe_rmtree(partial_root)
+
+    if profiler is not None:
+        profiler.record_near_embedding_detail(
+            in_csv=str(in_csv),
+            out_dir=str(out_dir),
+            device=str(dev),
+            use_amp=bool(use_amp),
+            batch_size=int(batch_size),
+            preprocess_workers=int(preprocess_workers),
+            inflight_factor=int(inflight_factor),
+            max_inflight=int(max_inflight),
+            n_input_rows=int(len(input_df)),
+            n_pending_rows=int(len(pending_df)),
+            n_reused_rows=int(len(existing_ok_uids)),
+            n_new_success_rows=int(new_success_count),
+            n_total_success_rows=int(len(manifest_df)),
+            n_failed_rows=int(len(failures_df)),
+            preprocess_task_wall_sum_s=float(
+                detail_stats["preprocess_task_wall_sum_s"]
+            ),
+            preprocess_task_cpu_user_s=float(
+                detail_stats["preprocess_task_cpu_user_s"]
+            ),
+            preprocess_task_cpu_sys_s=float(detail_stats["preprocess_task_cpu_sys_s"]),
+            preprocess_task_cpu_total_s=float(
+                detail_stats["preprocess_task_cpu_total_s"]
+            ),
+            tensor_load_wall_s=float(detail_stats["tensor_load_wall_s"]),
+            flush_wall_s=float(detail_stats["flush_wall_s"]),
+            inference_gpu_time_s=float(detail_stats["inference_gpu_time_s"]),
+            model_init_wall_s=float(detail_stats["model_init_wall_s"]),
+            num_flushes=int(detail_stats["num_flushes"]),
+            num_fallback_batches=int(detail_stats["num_fallback_batches"]),
+            num_fallback_scans=int(detail_stats["num_fallback_scans"]),
+            num_preprocess_failures=int(detail_stats["num_preprocess_failures"]),
+            num_tensor_load_failures=int(detail_stats["num_tensor_load_failures"]),
+        )
 
     print(f"[NEAR EMBED] input rows: {len(input_df):,}")
     print(f"[NEAR EMBED] already completed rows reused: {len(existing_ok_uids):,}")

@@ -106,6 +106,9 @@ subject_id }}{% endblock %} {% block content %}
   {{ {"prev": prev_review_href, "next": next_review_href} | tojson }}
 </script>
 
+<script id="pair-asset-url" type="application/json">
+  {{ url_for("pair_asset") | tojson }}
+</script>
 {% endblock %} {% block extra_scripts %}
 <script src="{{ url_for('static', filename='review.js') }}"></script>
 {% endblock %}

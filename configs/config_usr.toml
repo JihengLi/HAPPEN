@@ -1,9 +1,10 @@
 [run]
-out = "./outputs/T1w"
+out = ""
 stages = ["exact", "near"]
+profile_runtime = false
 
 [exact]
-root = "/nfs2/harmonization/BIDS"
+root = ""
 candidates_csv = ""
 valid_csv = ""
 modality = "T1w"
@@ -15,19 +16,8 @@ preprocess_workers = 32
 batch_size = 32
 device = "auto"
 use_amp = true
-normalize = true
 overwrite_embeddings = false
 fail_fast = false
-
-crop_shape = [160, 192, 160]
-axial_axis = 2
-slices_2p5d = 32
-slice_stride = 1
-winsor = [1.0, 99.0]
-hist_matching = true
-repro = true
-delete_extras = true
-inflight_factor = 2
 
 topk = 500
 retrieval_batch_size = 2048
@@ -43,4 +33,3 @@ review_mode = "precompute"   # off | lazy | precompute
 review_workers = 32
 overwrite_review_assets = false
 max_scan_candidates_per_query = 100
-max_subject_candidates_per_query = 100

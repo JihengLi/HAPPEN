@@ -55,6 +55,24 @@
     return `/png?${params.toString()}`;
   }
 
+  function buildPairAssetUrl(kind, scanUidA, scanUidB) {
+    const a = normScanUid(scanUidA);
+    const b = normScanUid(scanUidB);
+    if (!a || !b) {
+      throw new Error("Missing scan_uid_a/scan_uid_b for pair asset");
+    }
+
+    const u = new URL(PAIR_ASSET_URL, window.location.origin);
+    u.searchParams.set("kind", safeStr(kind).trim().toLowerCase());
+    u.searchParams.set("scan_uid_a", a);
+    u.searchParams.set("scan_uid_b", b);
+
+    return (
+      u.pathname +
+      (u.searchParams.toString() ? `?${u.searchParams.toString()}` : "")
+    );
+  }
+
   function metaText(scanObj, isCandidate) {
     const ds = safeStr(scanObj.dataset).trim();
     const sbj = safeStr(scanObj.subject_id).trim();
@@ -165,6 +183,7 @@
 
   const SUBJECT_DATA = readInjectedJSON("subject-data");
   const SUBJECT_NAV = readInjectedJSON("subject-nav");
+  const PAIR_ASSET_URL = readInjectedJSON("pair-asset-url");
 
   if (!Array.isArray(SUBJECT_DATA) || SUBJECT_DATA.length === 0) {
     throw new Error("subject-data is empty or not an array");
@@ -208,9 +227,32 @@
   });
   if (!scratchCtx) throw new Error("scratchCanvas.getContext returned null");
 
+  const imageLoadCache = new Map();
+
   let queryIdx = 0;
   let candIdx = 0;
   let busy = false;
+  let renderVersion = 0;
+
+  function loadImageUrl(url) {
+    if (!url) {
+      return Promise.resolve({ status: "error", img: null, url: "" });
+    }
+
+    if (imageLoadCache.has(url)) {
+      return imageLoadCache.get(url);
+    }
+
+    const p = new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ status: "loaded", img, url });
+      img.onerror = () => resolve({ status: "error", img: null, url });
+      img.src = url;
+    });
+
+    imageLoadCache.set(url, p);
+    return p;
+  }
 
   function currentQueryBlock() {
     const qb = SUBJECT_DATA[queryIdx];
@@ -304,7 +346,7 @@
   }
 
   const DIFF_MAX = 64;
-  const CHECK_TILE = 64;
+  const CHECK_TILE = 16;
 
   function showMissing(canvasEl, missingEl, msg) {
     canvasEl.style.display = "none";
@@ -336,20 +378,35 @@
     return scratchCtx.getImageData(0, 0, w, h);
   }
 
-  function computeAndRenderDiffAndChecker() {
-    if (!queryImg.complete || !candImg.complete) return;
+  function drawLoadedImageToCanvas(img, canvasEl, ctx, missingEl) {
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    if (!w || !h) {
+      showMissing(canvasEl, missingEl, "(Unavailable)");
+      return;
+    }
+
+    canvasEl.width = w;
+    canvasEl.height = h;
+    ctx.clearRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0);
+    showCanvas(canvasEl, missingEl);
+  }
+
+  function computeAndRenderDiffAndCheckerLocal() {
+    if (!queryImg.complete || !candImg.complete) return false;
 
     if (queryImg.style.display === "none" || candImg.style.display === "none") {
       showMissing(diffCanvas, diffMissing, "(Diff unavailable)");
       showMissing(checkCanvas, checkMissing, "(Checkerboard unavailable)");
-      return;
+      return false;
     }
 
     if (queryImg.naturalWidth <= 0 || queryImg.naturalHeight <= 0) {
-      throw new Error("queryImg has no natural size (failed to load?)");
+      return false;
     }
     if (candImg.naturalWidth <= 0 || candImg.naturalHeight <= 0) {
-      throw new Error("candImg has no natural size (failed to load?)");
+      return false;
     }
 
     if (
@@ -416,6 +473,7 @@
 
     checkCtx.putImageData(chkOut, 0, 0);
     showCanvas(checkCanvas, checkMissing);
+    return true;
   }
 
   function setImgOrMissing(imgEl, missingEl, url) {
@@ -423,19 +481,65 @@
     imgEl.style.display = "block";
 
     imgEl.onload = () => {
-      computeAndRenderDiffAndChecker();
+      missingEl.style.display = "none";
+      imgEl.style.display = "block";
     };
 
     imgEl.onerror = () => {
       imgEl.style.display = "none";
       missingEl.style.display = "block";
-      computeAndRenderDiffAndChecker();
     };
 
     imgEl.src = url;
   }
 
+  async function renderDerivedPanels(version, q, c) {
+    if (!c) {
+      showMissing(diffCanvas, diffMissing, "(Diff unavailable)");
+      showMissing(checkCanvas, checkMissing, "(Checkerboard unavailable)");
+      return;
+    }
+
+    const diffUrl = buildPairAssetUrl("diff", q.scan_uid, c.scan_uid);
+    const checkUrl = buildPairAssetUrl("checkerboard", q.scan_uid, c.scan_uid);
+
+    const [diffRes, checkRes] = await Promise.all([
+      loadImageUrl(diffUrl),
+      loadImageUrl(checkUrl),
+    ]);
+
+    if (version !== renderVersion) return;
+
+    if (diffRes.status === "loaded" && checkRes.status === "loaded") {
+      drawLoadedImageToCanvas(diffRes.img, diffCanvas, diffCtx, diffMissing);
+      drawLoadedImageToCanvas(
+        checkRes.img,
+        checkCanvas,
+        checkCtx,
+        checkMissing,
+      );
+      return;
+    }
+
+    const [qStatus, cStatus] = await Promise.all([
+      waitForImage(queryImg),
+      waitForImage(candImg),
+    ]);
+
+    if (version !== renderVersion) return;
+
+    if (qStatus === "loaded" && cStatus === "loaded") {
+      const ok = computeAndRenderDiffAndCheckerLocal();
+      if (ok) return;
+    }
+
+    showMissing(diffCanvas, diffMissing, "(Diff unavailable)");
+    showMissing(checkCanvas, checkMissing, "(Checkerboard unavailable)");
+  }
+
   async function renderAll() {
+    const version = ++renderVersion;
+
     const qb = currentQueryBlock();
     const q = qb.query;
     const cands = currentCandidates();
@@ -455,6 +559,7 @@
       setImgOrMissing(candImg, candMissing, buildPngUrl(c));
 
       const res = await ensureViewed(q, c);
+      if (version !== renderVersion) return;
       applyDecisionToUI(res.decision || null);
     } else {
       candMeta.textContent = "No candidates for this query.\n\u00A0";
@@ -465,9 +570,10 @@
 
       showMissing(diffCanvas, diffMissing, "(Diff unavailable)");
       showMissing(checkCanvas, checkMissing, "(Checkerboard unavailable)");
+      return;
     }
 
-    computeAndRenderDiffAndChecker();
+    await renderDerivedPanels(version, q, c);
   }
 
   async function finalizeIfNavLoading() {
@@ -476,10 +582,15 @@
     await waitForImage(queryImg);
     await waitForImage(candImg);
 
-    computeAndRenderDiffAndChecker();
+    if (currentCandidate()) {
+      await renderDerivedPanels(
+        renderVersion,
+        currentQuery(),
+        currentCandidate(),
+      );
+    }
 
     restoreReviewScrollYNow();
-
     endNavLoading();
   }
 
@@ -685,7 +796,5 @@
 
     await renderAll();
     await finalizeIfNavLoading();
-
-    computeAndRenderDiffAndChecker();
   })();
 })();

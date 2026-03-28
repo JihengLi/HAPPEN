@@ -5,16 +5,18 @@ Email: jiheng.li.1@vanderbilt.edu
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
-from .preparation import prepare_no_exact_dup
-from .embedding import run_embedding_inference
-from .retrieval import run_faiss_retrieval
-from .grouping import run_grouping
-from .format import build_review_tables
 from .assets import build_review_assets
+from .embedding import run_embedding_inference
+from .format import build_review_table
+from .grouping import run_grouping
+from .preparation import prepare_no_exact_dup
+from .retrieval import run_faiss_retrieval
+from ..utils.runtime_profile import RuntimeProfiler
 
 
 @dataclass
@@ -34,8 +36,7 @@ class NearStageArtifacts:
     subject_groups_csv: Path
 
     review_dir: Optional[Path]
-    scan_level_review_csv: Optional[Path]
-    subject_level_review_csv: Optional[Path]
+    review_candidates_csv: Optional[Path]
     png_dir: Optional[Path]
     diff_dir: Optional[Path]
     checkerboard_dir: Optional[Path]
@@ -69,12 +70,12 @@ def run_near_stage(
     train_size: int = 200000,
     seed: int = 0,
     overwrite_retrieval: bool = False,
-    min_similarity: float = 0.8,
+    min_similarity: float = 0.92,
     review_mode: str = "off",  # "off" | "lazy" | "precompute"
     review_workers: int = 24,
     overwrite_review_assets: bool = False,
     max_scan_candidates_per_query: Optional[int] = None,
-    max_subject_candidates_per_query: Optional[int] = None,
+    profiler: Optional[RuntimeProfiler] = None,
 ) -> NearStageArtifacts:
     out_dir = Path(out_dir).expanduser().resolve()
     exact_dir = out_dir / "exact"
@@ -99,8 +100,7 @@ def run_near_stage(
     subject_edges_csv = near_dir / "subject_edges.csv"
     subject_groups_csv = near_dir / "subject_groups.csv"
 
-    scan_level_review_csv: Optional[Path] = None
-    subject_level_review_csv: Optional[Path] = None
+    review_candidates_csv: Optional[Path] = None
     png_dir: Optional[Path] = None
     diff_dir: Optional[Path] = None
     checkerboard_dir: Optional[Path] = None
@@ -111,83 +111,134 @@ def run_near_stage(
     if review_mode not in {"off", "lazy", "precompute"}:
         raise ValueError("review_mode must be 'off', 'lazy', or 'precompute'")
 
-    print("[NEAR] Step 1/6: prepare near input")
-    prepare_no_exact_dup(
-        valid_csv=valid_csv,
-        exact_duplicates_csv=exact_duplicates_csv,
-        out_keep_csv=no_exact_dup_csv,
-        out_removed_csv=exact_removed_csv,
-        hash_errors_csv=hash_errors_csv,
+    remove_exact_ctx = (
+        profiler.stage(
+            "near_remove_exact",
+            valid_csv=str(valid_csv),
+            exact_duplicates_csv=str(exact_duplicates_csv),
+            hash_errors_csv=str(hash_errors_csv),
+        )
+        if profiler is not None
+        else nullcontext()
     )
 
-    print("[NEAR] Step 2/6: embedding inference")
-    run_embedding_inference(
-        in_csv=no_exact_dup_csv,
-        out_dir=near_dir,
-        preprocess_workers=preprocess_workers,
-        batch_size=batch_size,
-        device=device,
-        use_amp=use_amp,
-        normalize=normalize,
-        overwrite=overwrite_embeddings,
-        fail_fast=fail_fast,
-        crop_shape=crop_shape,
-        axial_axis=axial_axis,
-        slices_2p5d=slices_2p5d,
-        slice_stride=slice_stride,
-        winsor=winsor,
-        hist_matching=hist_matching,
-        repro=repro,
-        delete_extras=delete_extras,
-        inflight_factor=inflight_factor,
+    with remove_exact_ctx:
+        print("[NEAR] Step 1/6: prepare near input")
+        prepare_no_exact_dup(
+            valid_csv=valid_csv,
+            exact_duplicates_csv=exact_duplicates_csv,
+            out_keep_csv=no_exact_dup_csv,
+            out_removed_csv=exact_removed_csv,
+            hash_errors_csv=hash_errors_csv,
+        )
+
+    embedding_ctx = (
+        profiler.stage(
+            "near_embedding",
+            preprocess_workers=preprocess_workers,
+            batch_size=batch_size,
+            device=device,
+            use_amp=use_amp,
+            normalize=normalize,
+            overwrite_embeddings=overwrite_embeddings,
+            fail_fast=fail_fast,
+            crop_shape=str(tuple(crop_shape)),
+            axial_axis=axial_axis,
+            slices_2p5d=slices_2p5d,
+            slice_stride=slice_stride,
+            winsor=str(tuple(winsor)),
+            hist_matching=hist_matching,
+            repro=repro,
+            delete_extras=delete_extras,
+            inflight_factor=inflight_factor,
+        )
+        if profiler is not None
+        else nullcontext()
     )
 
-    print("[NEAR] Step 3/6: retrieval")
-    run_faiss_retrieval(
-        manifest_csv=embedding_manifest_csv,
-        embeddings_npy=embeddings_npy,
-        out_csv=raw_neighbors_csv,
-        topk=topk,
-        batch_size=retrieval_batch_size,
-        use_ivf=use_ivf,
-        nlist=nlist,
-        nprobe=nprobe,
-        train_size=train_size,
-        seed=seed,
-        overwrite=overwrite_retrieval,
+    with embedding_ctx:
+        print("[NEAR] Step 2/6: embedding inference")
+        run_embedding_inference(
+            in_csv=no_exact_dup_csv,
+            out_dir=near_dir,
+            preprocess_workers=preprocess_workers,
+            batch_size=batch_size,
+            device=device,
+            use_amp=use_amp,
+            normalize=normalize,
+            overwrite=overwrite_embeddings,
+            fail_fast=fail_fast,
+            crop_shape=crop_shape,
+            axial_axis=axial_axis,
+            slices_2p5d=slices_2p5d,
+            slice_stride=slice_stride,
+            winsor=winsor,
+            hist_matching=hist_matching,
+            repro=repro,
+            delete_extras=delete_extras,
+            inflight_factor=inflight_factor,
+            profiler=profiler,
+        )
+
+    faiss_group_ctx = (
+        profiler.stage(
+            "near_faiss_group",
+            topk=topk,
+            retrieval_batch_size=retrieval_batch_size,
+            use_ivf=use_ivf,
+            nlist=nlist,
+            nprobe=nprobe,
+            train_size=train_size,
+            seed=seed,
+            overwrite_retrieval=overwrite_retrieval,
+            min_similarity=min_similarity,
+        )
+        if profiler is not None
+        else nullcontext()
     )
 
-    print("[NEAR] Step 4/6: grouping")
-    run_grouping(
-        raw_neighbors_csv=raw_neighbors_csv,
-        out_scan_candidates_csv=scan_candidates_csv,
-        out_subject_edges_csv=subject_edges_csv,
-        out_subject_groups_csv=subject_groups_csv,
-        min_similarity=min_similarity,
-    )
+    with faiss_group_ctx:
+        print("[NEAR] Step 3/6: FAISS retrieval")
+        run_faiss_retrieval(
+            manifest_csv=embedding_manifest_csv,
+            embeddings_npy=embeddings_npy,
+            out_csv=raw_neighbors_csv,
+            topk=topk,
+            batch_size=retrieval_batch_size,
+            use_ivf=use_ivf,
+            nlist=nlist,
+            nprobe=nprobe,
+            train_size=train_size,
+            seed=seed,
+            overwrite=overwrite_retrieval,
+        )
+
+        print("[NEAR] Step 4/6: grouping")
+        run_grouping(
+            raw_neighbors_csv=raw_neighbors_csv,
+            out_scan_candidates_csv=scan_candidates_csv,
+            out_subject_edges_csv=subject_edges_csv,
+            out_subject_groups_csv=subject_groups_csv,
+            min_similarity=min_similarity,
+        )
 
     if review_mode != "off":
         review_dir.mkdir(parents=True, exist_ok=True)
 
-        scan_level_review_csv = review_dir / "scan_level_review.csv"
-        subject_level_review_csv = review_dir / "subject_level_review.csv"
+        review_candidates_csv = review_dir / "review_candidates.csv"
 
-        print("[NEAR] Step 5/6: build review tables")
-        build_review_tables(
+        print("[NEAR] Step 5/6: build review table")
+        build_review_table(
             review_dir=review_dir,
             scan_candidates_csv=scan_candidates_csv,
-            subject_edges_csv=subject_edges_csv,
-            subject_groups_csv=subject_groups_csv,
-            max_scan_candidates_per_query=max_scan_candidates_per_query,
-            max_subject_candidates_per_query=max_subject_candidates_per_query,
+            max_candidates_per_query=max_scan_candidates_per_query,
         )
 
         print(f"[NEAR] Step 6/6: build review assets (mode={review_mode})")
         build_review_assets(
             review_dir=review_dir,
             manifest_csv=embedding_manifest_csv,
-            scan_level_review_csv=scan_level_review_csv,
-            subject_level_review_csv=subject_level_review_csv,
+            review_candidates_csv=review_candidates_csv,
             mode=review_mode,
             workers=review_workers,
             overwrite=overwrite_review_assets,
@@ -218,8 +269,7 @@ def run_near_stage(
         subject_edges_csv=subject_edges_csv,
         subject_groups_csv=subject_groups_csv,
         review_dir=review_dir if review_mode != "off" else None,
-        scan_level_review_csv=scan_level_review_csv,
-        subject_level_review_csv=subject_level_review_csv,
+        review_candidates_csv=review_candidates_csv,
         png_dir=png_dir,
         diff_dir=diff_dir,
         checkerboard_dir=checkerboard_dir,

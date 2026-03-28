@@ -1,0 +1,9 @@
+[review]
+png_root = "./outputs/test/near/review/assets/png"
+candidates_csv = "./outputs/test/near/review/review_candidates.csv"
+decisions_csv = "./outputs/test/near/review/review_decisions.csv"
+
+autosave_every = 1
+host = "127.0.0.1"
+port = 5291
+debug = false

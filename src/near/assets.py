@@ -6,12 +6,11 @@ Email: jiheng.li.1@vanderbilt.edu
 from __future__ import annotations
 
 import os
-import re
 import shutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import get_context
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Sequence, Tuple, Union
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -34,7 +33,6 @@ from .preprocessing import (
 )
 
 
-_SCAN_SLOT_RE = re.compile(r"^candidate_(\d+)_dataset$")
 DEFAULT_FRACS: List[float] = [0.30, 0.40, 0.45, 0.50, 0.55, 0.60, 0.70]
 DEFAULT_PERC: Tuple[float, float] = (1.0, 99.0)
 DEFAULT_DIFF_MAX: float = 64.0
@@ -116,6 +114,52 @@ def _work_dir(review_dir: Path, scan_uid: str) -> Path:
     return Path(review_dir).expanduser().resolve() / "cache" / "work" / scan_uid
 
 
+def _scan_png_path(
+    review_dir: Path,
+    dataset: str,
+    subject_id: str,
+    session_id: str,
+    scan_uid: str,
+) -> Path:
+    base = (
+        Path(review_dir).expanduser().resolve()
+        / "assets"
+        / "png"
+        / str(dataset).strip()
+        / str(subject_id).strip()
+    )
+    ses = str(session_id).strip()
+    if ses:
+        base = base / ses
+    return (base / f"{str(scan_uid).strip()}.png").resolve()
+
+
+def _pair_diff_path(
+    review_dir: Path,
+    scan_uid_a: str,
+    scan_uid_b: str,
+) -> Path:
+    return (
+        Path(review_dir).expanduser().resolve()
+        / "assets"
+        / "diff"
+        / f"{_pair_key(scan_uid_a, scan_uid_b)}.png"
+    ).resolve()
+
+
+def _pair_checkerboard_path(
+    review_dir: Path,
+    scan_uid_a: str,
+    scan_uid_b: str,
+) -> Path:
+    return (
+        Path(review_dir).expanduser().resolve()
+        / "assets"
+        / "checkerboard"
+        / f"{_pair_key(scan_uid_a, scan_uid_b)}.png"
+    ).resolve()
+
+
 def to_uint8(img: np.ndarray) -> np.ndarray:
     a = np.asarray(img)
 
@@ -188,7 +232,9 @@ def hstack_with_padding(
     for i, cc in enumerate(cols_u8):
         if cc.shape[1] < W:
             pad_w = np.full(
-                (cc.shape[0], W - cc.shape[1], 3), pad_value, dtype=cc.dtype
+                (cc.shape[0], W - cc.shape[1], 3),
+                pad_value,
+                dtype=cc.dtype,
             )
             cc = np.hstack([cc, pad_w])
         elif cc.shape[1] > W:
@@ -280,17 +326,14 @@ def _difference_tile(
     pos = t >= 0
     neg = ~pos
 
-    # default white
     out[..., 0] = 255.0
     out[..., 1] = 255.0
     out[..., 2] = 255.0
 
-    # positive: white -> red
     out[pos, 1] = 255.0 * (1.0 - t[pos])
     out[pos, 2] = 255.0 * (1.0 - t[pos])
 
-    # negative: blue -> white
-    u = 1.0 + t[neg]  # -1 -> 0, 0 -> 1
+    u = 1.0 + t[neg]
     out[neg, 0] = 255.0 * u
     out[neg, 1] = 255.0 * u
     out[neg, 2] = 255.0
@@ -482,215 +525,133 @@ def _manifest_meta_map(manifest_df: pd.DataFrame) -> Dict[str, Dict[str, str]]:
 def _candidate_slots_from_cols(cols: Sequence[str]) -> List[int]:
     slots: List[int] = []
     for c in cols:
-        m = _SCAN_SLOT_RE.match(str(c).strip())
-        if m:
-            slots.append(int(m.group(1)))
+        cc = str(c).strip()
+        if cc.startswith("candidate_") and cc.endswith("_dataset"):
+            parts = cc.split("_")
+            if len(parts) >= 3 and parts[1].isdigit():
+                slots.append(int(parts[1]))
     return sorted(set(slots))
 
 
-def _read_scan_level_review(scan_level_review_csv: Union[str, Path]) -> pd.DataFrame:
-    scan_level_review_csv = Path(scan_level_review_csv).expanduser().resolve()
-    df = pd.read_csv(scan_level_review_csv, dtype=str).fillna("")
+def _read_review_candidates(review_candidates_csv: Union[str, Path]) -> pd.DataFrame:
+    review_candidates_csv = Path(review_candidates_csv).expanduser().resolve()
+    df = pd.read_csv(review_candidates_csv, dtype=str).fillna("")
+    df.columns = [str(c).strip() for c in df.columns]
 
     required_cols = [
         "query_dataset",
         "query_subject_id",
         "query_session_id",
         "query_scan_uid",
-        "query_png_path",
+        "query_src_path",
         "n_candidates",
     ]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         raise ValueError(
-            f"{scan_level_review_csv} is missing required columns: {missing}"
+            f"{review_candidates_csv} is missing required columns: {missing}"
         )
 
     return df
 
 
-def _read_subject_level_review(
-    subject_level_review_csv: Union[str, Path],
-) -> pd.DataFrame:
-    subject_level_review_csv = Path(subject_level_review_csv).expanduser().resolve()
-    df = pd.read_csv(subject_level_review_csv, dtype=str).fillna("")
-
-    required_cols = [
-        "group_id",
-        "group_size",
-        "query_dataset",
-        "query_subject_id",
-        "n_candidates",
-    ]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(
-            f"{subject_level_review_csv} is missing required columns: {missing}"
-        )
-
-    return df
-
-
-def _register_unique_path(
-    mapping: Dict[str, str],
-    key: str,
-    rel_path: str,
-    kind: str,
+def _register_unique_scan_request(
+    mapping: Dict[str, Dict[str, str]],
+    scan_uid: str,
+    dataset: str,
+    subject_id: str,
+    session_id: str,
+    src_path: str,
 ) -> None:
-    k = str(key).strip()
-    p = str(rel_path).strip()
-
-    if not k:
+    uid = clean_str(scan_uid)
+    if not uid:
         return
 
-    if not p:
-        raise ValueError(f"empty {kind} path for key={k}")
+    rec = {
+        "dataset": clean_str(dataset),
+        "subject_id": clean_str(subject_id),
+        "session_id": clean_str(session_id),
+        "src_path": clean_str(src_path),
+    }
 
-    if k in mapping and mapping[k] != p:
-        raise ValueError(f"inconsistent {kind} path for key={k}: {mapping[k]} vs {p}")
+    if not rec["dataset"] or not rec["subject_id"] or not rec["src_path"]:
+        raise ValueError(f"incomplete scan request for scan_uid={uid}: {rec}")
 
-    mapping[k] = p
+    if uid in mapping and mapping[uid] != rec:
+        raise ValueError(
+            f"inconsistent scan metadata for scan_uid={uid}: {mapping[uid]} vs {rec}"
+        )
+
+    mapping[uid] = rec
 
 
 def collect_scan_requests(
-    scan_level_review_csv: Union[str, Path],
-    subject_level_review_csv: Union[str, Path],
-) -> Dict[str, str]:
-    scan_df = _read_scan_level_review(scan_level_review_csv)
-    subj_df = _read_subject_level_review(subject_level_review_csv)
+    review_candidates_csv: Union[str, Path],
+) -> Dict[str, Dict[str, str]]:
+    df = _read_review_candidates(review_candidates_csv)
+    slots = _candidate_slots_from_cols(df.columns.tolist())
 
-    scan_uid_to_png: Dict[str, str] = {}
+    scan_uid_to_meta: Dict[str, Dict[str, str]] = {}
 
-    scan_slots = _candidate_slots_from_cols(scan_df.columns.tolist())
-    for _, r in scan_df.iterrows():
-        _register_unique_path(
-            scan_uid_to_png,
-            str(r["query_scan_uid"]),
-            str(r["query_png_path"]),
-            kind="scan png",
+    for _, r in df.iterrows():
+        _register_unique_scan_request(
+            scan_uid_to_meta,
+            scan_uid=str(r["query_scan_uid"]),
+            dataset=str(r["query_dataset"]),
+            subject_id=str(r["query_subject_id"]),
+            session_id=str(r["query_session_id"]),
+            src_path=str(r["query_src_path"]),
         )
 
-        for k in scan_slots:
+        for k in slots:
             ds = clean_str(r.get(f"candidate_{k}_dataset", ""))
             if not ds:
                 continue
 
-            _register_unique_path(
-                scan_uid_to_png,
-                str(r.get(f"candidate_{k}_scan_uid", "")),
-                str(r.get(f"candidate_{k}_png_path", "")),
-                kind="scan png",
+            _register_unique_scan_request(
+                scan_uid_to_meta,
+                scan_uid=str(r.get(f"candidate_{k}_scan_uid", "")),
+                dataset=str(r.get(f"candidate_{k}_dataset", "")),
+                subject_id=str(r.get(f"candidate_{k}_subject_id", "")),
+                session_id=str(r.get(f"candidate_{k}_session_id", "")),
+                src_path=str(r.get(f"candidate_{k}_src_path", "")),
             )
 
-    subj_slots = _candidate_slots_from_cols(subj_df.columns.tolist())
-    for _, r in subj_df.iterrows():
-        for k in subj_slots:
-            ds = clean_str(r.get(f"candidate_{k}_dataset", ""))
-            if not ds:
-                continue
-
-            _register_unique_path(
-                scan_uid_to_png,
-                str(r.get(f"candidate_{k}_query_exemplar_scan_uid", "")),
-                str(r.get(f"candidate_{k}_query_exemplar_png_path", "")),
-                kind="scan png",
-            )
-            _register_unique_path(
-                scan_uid_to_png,
-                str(r.get(f"candidate_{k}_candidate_exemplar_scan_uid", "")),
-                str(r.get(f"candidate_{k}_candidate_exemplar_png_path", "")),
-                kind="scan png",
-            )
-
-    return scan_uid_to_png
+    return scan_uid_to_meta
 
 
 def collect_pair_requests(
-    scan_level_review_csv: Union[str, Path],
-    subject_level_review_csv: Union[str, Path],
+    review_candidates_csv: Union[str, Path],
 ) -> Dict[str, Dict[str, str]]:
-    scan_df = _read_scan_level_review(scan_level_review_csv)
-    subj_df = _read_subject_level_review(subject_level_review_csv)
+    df = _read_review_candidates(review_candidates_csv)
+    slots = _candidate_slots_from_cols(df.columns.tolist())
 
     pair_map: Dict[str, Dict[str, str]] = {}
 
-    scan_slots = _candidate_slots_from_cols(scan_df.columns.tolist())
-    for _, r in scan_df.iterrows():
-        q_uid = str(r["query_scan_uid"]).strip()
+    for _, r in df.iterrows():
+        query_scan_uid = clean_str(r.get("query_scan_uid", ""))
+        if not query_scan_uid:
+            continue
 
-        for k in scan_slots:
-            ds = clean_str(r.get(f"candidate_{k}_dataset", ""))
-            if not ds:
+        for k in slots:
+            cand_dataset = clean_str(r.get(f"candidate_{k}_dataset", ""))
+            if not cand_dataset:
                 continue
 
-            c_uid = str(r.get(f"candidate_{k}_scan_uid", "")).strip()
-            if not c_uid:
+            cand_scan_uid = clean_str(r.get(f"candidate_{k}_scan_uid", ""))
+            if not cand_scan_uid:
                 raise ValueError(
-                    f"missing candidate_{k}_scan_uid for query_scan_uid={q_uid}"
+                    f"missing candidate_{k}_scan_uid for query_scan_uid={query_scan_uid}"
                 )
 
-            diff_path = str(r.get(f"candidate_{k}_diff_path", "")).strip()
-            cb_path = str(r.get(f"candidate_{k}_checkerboard_path", "")).strip()
-
-            if not diff_path:
-                raise ValueError(
-                    f"missing candidate_{k}_diff_path for pair {q_uid}, {c_uid}"
-                )
-            if not cb_path:
-                raise ValueError(
-                    f"missing candidate_{k}_checkerboard_path for pair {q_uid}, {c_uid}"
-                )
-
-            pkey = _pair_key(q_uid, c_uid)
+            pkey = _pair_key(query_scan_uid, cand_scan_uid)
             rec = {
-                "scan_uid_a": min(q_uid, c_uid),
-                "scan_uid_b": max(q_uid, c_uid),
-                "diff_path": diff_path,
-                "checkerboard_path": cb_path,
+                "scan_uid_a": min(query_scan_uid, cand_scan_uid),
+                "scan_uid_b": max(query_scan_uid, cand_scan_uid),
             }
 
             if pkey in pair_map and pair_map[pkey] != rec:
-                raise ValueError(f"inconsistent pair asset paths for {pkey}")
-
-            pair_map[pkey] = rec
-
-    subj_slots = _candidate_slots_from_cols(subj_df.columns.tolist())
-    for _, r in subj_df.iterrows():
-        for k in subj_slots:
-            ds = clean_str(r.get(f"candidate_{k}_dataset", ""))
-            if not ds:
-                continue
-
-            q_uid = str(r.get(f"candidate_{k}_query_exemplar_scan_uid", "")).strip()
-            c_uid = str(r.get(f"candidate_{k}_candidate_exemplar_scan_uid", "")).strip()
-
-            if not q_uid or not c_uid:
-                raise ValueError(
-                    f"missing exemplar scan_uid in subject-level review slot {k}"
-                )
-
-            diff_path = str(r.get(f"candidate_{k}_diff_path", "")).strip()
-            cb_path = str(r.get(f"candidate_{k}_checkerboard_path", "")).strip()
-
-            if not diff_path:
-                raise ValueError(
-                    f"missing candidate_{k}_diff_path for pair {q_uid}, {c_uid}"
-                )
-            if not cb_path:
-                raise ValueError(
-                    f"missing candidate_{k}_checkerboard_path for pair {q_uid}, {c_uid}"
-                )
-
-            pkey = _pair_key(q_uid, c_uid)
-            rec = {
-                "scan_uid_a": min(q_uid, c_uid),
-                "scan_uid_b": max(q_uid, c_uid),
-                "diff_path": diff_path,
-                "checkerboard_path": cb_path,
-            }
-
-            if pkey in pair_map and pair_map[pkey] != rec:
-                raise ValueError(f"inconsistent pair asset paths for {pkey}")
+                raise ValueError(f"inconsistent pair registration for {pkey}")
 
             pair_map[pkey] = rec
 
@@ -917,6 +878,9 @@ def _precompute_pair_norm_caches(
             }
         )
 
+    if not recs:
+        return 0
+
     with ProcessPoolExecutor(
         max_workers=int(workers),
         mp_context=get_context("spawn"),
@@ -945,8 +909,7 @@ def ensure_scan_assets(
     review_dir: Union[str, Path],
     manifest_csv: Union[str, Path],
     atlas_image: Union[str, Path],
-    scan_level_review_csv: Union[str, Path],
-    subject_level_review_csv: Union[str, Path],
+    review_candidates_csv: Union[str, Path],
     workers: int = 24,
     overwrite: bool = False,
     winsor: Tuple[float, float] = (1.0, 99.0),
@@ -962,54 +925,87 @@ def ensure_scan_assets(
         raise FileNotFoundError(f"atlas image not found: {atlas_image}")
 
     manifest_df = _read_manifest(manifest_csv)
-    meta_map = _manifest_meta_map(manifest_df)
+    manifest_meta = _manifest_meta_map(manifest_df)
+    requested_meta = collect_scan_requests(review_candidates_csv)
 
-    scan_requests = collect_scan_requests(
-        scan_level_review_csv=scan_level_review_csv,
-        subject_level_review_csv=subject_level_review_csv,
-    )
-
-    missing_uids = sorted(uid for uid in scan_requests if uid not in meta_map)
+    missing_uids = sorted(uid for uid in requested_meta if uid not in manifest_meta)
     if missing_uids:
         raise ValueError(
-            f"scan_uids referenced in review tables not found in manifest: {missing_uids[:10]}"
+            "scan_uids referenced in review_candidates.csv not found in manifest: "
+            f"{missing_uids[:10]}"
         )
 
     recs: List[Dict[str, str]] = []
-    for scan_uid, rel_png in sorted(scan_requests.items()):
-        meta = meta_map[scan_uid]
+    for scan_uid, req in sorted(requested_meta.items()):
+        man = manifest_meta[scan_uid]
+
+        if req["dataset"] != man["dataset"]:
+            raise ValueError(
+                f"dataset mismatch for scan_uid={scan_uid}: "
+                f"review={req['dataset']} vs manifest={man['dataset']}"
+            )
+        if req["subject_id"] != man["subject_id"]:
+            raise ValueError(
+                f"subject_id mismatch for scan_uid={scan_uid}: "
+                f"review={req['subject_id']} vs manifest={man['subject_id']}"
+            )
+        if req["session_id"] != man["session_id"]:
+            raise ValueError(
+                f"session_id mismatch for scan_uid={scan_uid}: "
+                f"review={req['session_id']} vs manifest={man['session_id']}"
+            )
+        if req["src_path"] and req["src_path"] != man["resolved_path"]:
+            raise ValueError(
+                f"src_path mismatch for scan_uid={scan_uid}: "
+                f"review={req['src_path']} vs manifest={man['resolved_path']}"
+            )
+
         recs.append(
             {
                 "scan_uid": scan_uid,
-                "resolved_path": meta["resolved_path"],
-                "png_path": str((review_dir / rel_png).resolve()),
+                "resolved_path": man["resolved_path"],
+                "png_path": str(
+                    _scan_png_path(
+                        review_dir=review_dir,
+                        dataset=man["dataset"],
+                        subject_id=man["subject_id"],
+                        session_id=man["session_id"],
+                        scan_uid=scan_uid,
+                    )
+                ),
                 "norm_path": str(_norm_cache_path(review_dir, scan_uid)),
                 "work_dir": str(_work_dir(review_dir, scan_uid)),
             }
         )
 
-    with ProcessPoolExecutor(
-        max_workers=int(workers),
-        mp_context=get_context("spawn"),
-    ) as ex:
-        futures = [
-            ex.submit(
-                _scan_asset_worker,
-                rec,
-                str(atlas_image),
-                bool(overwrite),
-                winsor,
-                bool(hist_matching),
-                bool(repro),
-                bool(delete_extras),
+    png_dir = review_dir / "assets" / "png"
+    png_dir.mkdir(parents=True, exist_ok=True)
+
+    if recs:
+        with ProcessPoolExecutor(
+            max_workers=int(workers),
+            mp_context=get_context("spawn"),
+        ) as ex:
+            futures = [
+                ex.submit(
+                    _scan_asset_worker,
+                    rec,
+                    str(atlas_image),
+                    bool(overwrite),
+                    winsor,
+                    bool(hist_matching),
+                    bool(repro),
+                    bool(delete_extras),
+                )
+                for rec in recs
+            ]
+            ok_total = _run_parallel_futures(
+                futures,
+                desc="review_scan_assets",
+                unit="scan",
             )
-            for rec in recs
-        ]
-        ok_total = _run_parallel_futures(
-            futures,
-            desc="review_scan_assets",
-            unit="scan",
-        )
+    else:
+        ok_total = 0
 
     fail_csv = review_dir / "scan_asset_failures.csv"
     _write_empty_failure_csv(fail_csv, SCAN_FAIL_COLS)
@@ -1018,7 +1014,7 @@ def ensure_scan_assets(
     print(f"[REVIEW ASSETS] scans ok: {ok_total}/{len(recs)}")
     print(f"[REVIEW ASSETS] scan failures: 0 -> {fail_csv}")
 
-    return review_dir / "assets" / "png", fail_csv
+    return png_dir, fail_csv
 
 
 def ensure_pair_assets(
@@ -1027,8 +1023,6 @@ def ensure_pair_assets(
     atlas_image: Union[str, Path],
     scan_uid_a: str,
     scan_uid_b: str,
-    diff_rel_path: Optional[str] = None,
-    checkerboard_rel_path: Optional[str] = None,
     overwrite: bool = False,
     winsor: Tuple[float, float] = (1.0, 99.0),
     hist_matching: bool = False,
@@ -1053,13 +1047,6 @@ def ensure_pair_assets(
         raise ValueError(f"scan_uid not found in manifest: {a}")
     if b not in meta_map:
         raise ValueError(f"scan_uid not found in manifest: {b}")
-
-    if diff_rel_path is None:
-        diff_rel_path = (Path("assets") / "diff" / f"{_pair_key(a, b)}.png").as_posix()
-    if checkerboard_rel_path is None:
-        checkerboard_rel_path = (
-            Path("assets") / "checkerboard" / f"{_pair_key(a, b)}.png"
-        ).as_posix()
 
     meta_a = meta_map[a]
     meta_b = meta_map[b]
@@ -1087,8 +1074,8 @@ def ensure_pair_assets(
         overwrite=overwrite,
     )
 
-    diff_out = (review_dir / diff_rel_path).resolve()
-    cb_out = (review_dir / checkerboard_rel_path).resolve()
+    diff_out = _pair_diff_path(review_dir, a, b)
+    cb_out = _pair_checkerboard_path(review_dir, a, b)
 
     render_pair_png(
         norm_path_a=norm_a,
@@ -1114,8 +1101,7 @@ def precompute_pair_assets(
     review_dir: Union[str, Path],
     manifest_csv: Union[str, Path],
     atlas_image: Union[str, Path],
-    scan_level_review_csv: Union[str, Path],
-    subject_level_review_csv: Union[str, Path],
+    review_candidates_csv: Union[str, Path],
     workers: int = 24,
     overwrite: bool = False,
     winsor: Tuple[float, float] = (1.0, 99.0),
@@ -1133,11 +1119,7 @@ def precompute_pair_assets(
 
     manifest_df = _read_manifest(manifest_csv)
     meta_map = _manifest_meta_map(manifest_df)
-
-    pair_requests = collect_pair_requests(
-        scan_level_review_csv=scan_level_review_csv,
-        subject_level_review_csv=subject_level_review_csv,
-    )
+    pair_requests = collect_pair_requests(review_candidates_csv)
 
     missing_uids = sorted(
         {
@@ -1149,7 +1131,8 @@ def precompute_pair_assets(
     )
     if missing_uids:
         raise ValueError(
-            f"scan_uids referenced in pair review tables not found in manifest: {missing_uids[:10]}"
+            "scan_uids referenced in review_candidates.csv not found in manifest: "
+            f"{missing_uids[:10]}"
         )
 
     norm_ok_total = _precompute_pair_norm_caches(
@@ -1176,31 +1159,37 @@ def precompute_pair_assets(
                 "scan_uid_b": b,
                 "norm_path_a": str(_norm_cache_path(review_dir, a)),
                 "norm_path_b": str(_norm_cache_path(review_dir, b)),
-                "diff_path": str((review_dir / rec["diff_path"]).resolve()),
-                "checkerboard_path": str(
-                    (review_dir / rec["checkerboard_path"]).resolve()
-                ),
+                "diff_path": str(_pair_diff_path(review_dir, a, b)),
+                "checkerboard_path": str(_pair_checkerboard_path(review_dir, a, b)),
             }
         )
 
-    with ProcessPoolExecutor(
-        max_workers=int(workers),
-        mp_context=get_context("spawn"),
-    ) as ex:
-        futures = [
-            ex.submit(
-                _pair_asset_worker,
-                rec,
-                bool(overwrite),
-                float(diff_max),
+    diff_dir = review_dir / "assets" / "diff"
+    checkerboard_dir = review_dir / "assets" / "checkerboard"
+    diff_dir.mkdir(parents=True, exist_ok=True)
+    checkerboard_dir.mkdir(parents=True, exist_ok=True)
+
+    if recs:
+        with ProcessPoolExecutor(
+            max_workers=int(workers),
+            mp_context=get_context("spawn"),
+        ) as ex:
+            futures = [
+                ex.submit(
+                    _pair_asset_worker,
+                    rec,
+                    bool(overwrite),
+                    float(diff_max),
+                )
+                for rec in recs
+            ]
+            ok_total = _run_parallel_futures(
+                futures,
+                desc="review_pair_assets",
+                unit="pair",
             )
-            for rec in recs
-        ]
-        ok_total = _run_parallel_futures(
-            futures,
-            desc="review_pair_assets",
-            unit="pair",
-        )
+    else:
+        ok_total = 0
 
     fail_csv = review_dir / "pair_asset_failures.csv"
     _write_empty_failure_csv(fail_csv, PAIR_FAIL_COLS)
@@ -1211,14 +1200,13 @@ def precompute_pair_assets(
     print(f"[REVIEW ASSETS] pairs ok: {ok_total}/{len(recs)}")
     print(f"[REVIEW ASSETS] pair failures: 0 -> {fail_csv}")
 
-    return review_dir / "assets" / "diff", review_dir / "assets" / "checkerboard"
+    return diff_dir, checkerboard_dir
 
 
 def build_review_assets(
     review_dir: Union[str, Path],
     manifest_csv: Union[str, Path],
-    scan_level_review_csv: Union[str, Path],
-    subject_level_review_csv: Union[str, Path],
+    review_candidates_csv: Union[str, Path],
     mode: str = "lazy",
     workers: int = 24,
     overwrite: bool = False,
@@ -1246,8 +1234,7 @@ def build_review_assets(
             review_dir=review_dir,
             manifest_csv=manifest_csv,
             atlas_image=atlas_image,
-            scan_level_review_csv=scan_level_review_csv,
-            subject_level_review_csv=subject_level_review_csv,
+            review_candidates_csv=review_candidates_csv,
             workers=workers,
             overwrite=overwrite,
             winsor=winsor,
@@ -1261,8 +1248,7 @@ def build_review_assets(
                 review_dir=review_dir,
                 manifest_csv=manifest_csv,
                 atlas_image=atlas_image,
-                scan_level_review_csv=scan_level_review_csv,
-                subject_level_review_csv=subject_level_review_csv,
+                review_candidates_csv=review_candidates_csv,
                 workers=workers,
                 overwrite=overwrite,
                 winsor=winsor,
@@ -1271,6 +1257,17 @@ def build_review_assets(
                 delete_extras=delete_extras,
                 diff_max=diff_max,
             )
+        else:
+            diff_dir = review_dir / "assets" / "diff"
+            checkerboard_dir = review_dir / "assets" / "checkerboard"
+            diff_dir.mkdir(parents=True, exist_ok=True)
+            checkerboard_dir.mkdir(parents=True, exist_ok=True)
+
+            pair_fail_csv = review_dir / "pair_asset_failures.csv"
+            _write_empty_failure_csv(pair_fail_csv, PAIR_FAIL_COLS)
+
+            print("[REVIEW ASSETS] pair assets skipped (mode=lazy)")
+            print(f"[REVIEW ASSETS] pair failures: 0 -> {pair_fail_csv}")
 
         print(f"[REVIEW ASSETS] mode={mode} done")
 
