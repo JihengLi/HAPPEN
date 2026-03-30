@@ -1,7 +1,7 @@
 [project]
-name = "hapid"
+name = "happen"
 version = "0.1.0"
-description = "Human-in-the-loop Auditing Pipeline for Identity Duplication in MRI Repositories."
+description = "HAPPEN: a Human-in-the-loop Auditing Pipeline for Exact and Near Duplicates in MRI Repositories."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -22,6 +22,3 @@ dependencies = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[project.scripts]
-hapid = "hapid:main"
