@@ -11,7 +11,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from zoneinfo import ZoneInfo
 
@@ -87,6 +87,7 @@ class DecisionStore:
         with self._lock:
             self._cache.clear()
             self._meta.clear()
+            self._writes_since_export = 0
             if self.out_csv.exists():
                 self._load_from_csv_locked(self.out_csv)
 
@@ -123,21 +124,21 @@ class DecisionStore:
         b_scan_uid: str,
         b_src_path: str,
     ) -> Tuple[str, str]:
-        ka = cls.make_item_key(
+        a_item_key = cls.make_item_key(
             dataset=a_dataset,
             subject_id=a_subject_id,
             session_id=a_session_id,
             scan_uid=a_scan_uid,
             src_path=a_src_path,
         )
-        kb = cls.make_item_key(
+        b_item_key = cls.make_item_key(
             dataset=b_dataset,
             subject_id=b_subject_id,
             session_id=b_session_id,
             scan_uid=b_scan_uid,
             src_path=b_src_path,
         )
-        return _pair_key(ka, kb)
+        return _pair_key(a_item_key, b_item_key)
 
     @staticmethod
     def _canonicalize_meta(
@@ -177,19 +178,90 @@ class DecisionStore:
                 _norm(b_session_id),
                 b_store_path,
             )
-        else:
-            return (
-                _norm(b_dataset),
-                _norm(b_subject_id),
-                _norm(b_session_id),
-                b_store_path,
-                _norm(a_dataset),
-                _norm(a_subject_id),
-                _norm(a_session_id),
-                a_store_path,
-            )
+
+        return (
+            _norm(b_dataset),
+            _norm(b_subject_id),
+            _norm(b_session_id),
+            b_store_path,
+            _norm(a_dataset),
+            _norm(a_subject_id),
+            _norm(a_session_id),
+            a_store_path,
+        )
+
+    @classmethod
+    def _build_key_and_meta(
+        cls,
+        *,
+        a_dataset: str,
+        a_subject_id: str,
+        a_session_id: str,
+        a_scan_uid: str,
+        a_src_path: str,
+        b_dataset: str,
+        b_subject_id: str,
+        b_session_id: str,
+        b_scan_uid: str,
+        b_src_path: str,
+    ) -> Tuple[Tuple[str, str], Tuple[str, str, str, str, str, str, str, str]]:
+        a_item_key = cls.make_item_key(
+            dataset=a_dataset,
+            subject_id=a_subject_id,
+            session_id=a_session_id,
+            scan_uid=a_scan_uid,
+            src_path=a_src_path,
+        )
+        b_item_key = cls.make_item_key(
+            dataset=b_dataset,
+            subject_id=b_subject_id,
+            session_id=b_session_id,
+            scan_uid=b_scan_uid,
+            src_path=b_src_path,
+        )
+        key = _pair_key(a_item_key, b_item_key)
+
+        meta = cls._canonicalize_meta(
+            a_dataset=a_dataset,
+            a_subject_id=a_subject_id,
+            a_session_id=a_session_id,
+            a_src_path=a_src_path,
+            a_item_key=a_item_key,
+            b_dataset=b_dataset,
+            b_subject_id=b_subject_id,
+            b_session_id=b_session_id,
+            b_src_path=b_src_path,
+            b_item_key=b_item_key,
+        )
+        return key, meta
+
+    def _maybe_export_locked(self) -> None:
+        if self._writes_since_export >= self.autosave_every:
+            self._export_locked()
+            self._writes_since_export = 0
+
+    def _set_decision_locked(
+        self,
+        *,
+        key: Tuple[str, str],
+        meta: Tuple[str, str, str, str, str, str, str, str],
+        qa_status: str,
+        reason: str,
+        timestamp_iso: str,
+    ) -> None:
+        self._cache[key] = Decision(
+            qa_status=qa_status,
+            reason=_norm(reason),
+            updated_at=timestamp_iso,
+        )
+        self._meta[key] = meta
+        self._writes_since_export += 1
 
     def is_decided(self, key: Tuple[str, str]) -> bool:
+        with self._lock:
+            return key in self._cache
+
+    def has_key(self, key: Tuple[str, str]) -> bool:
         with self._lock:
             return key in self._cache
 
@@ -197,10 +269,21 @@ class DecisionStore:
         with self._lock:
             return self._cache.get(key)
 
+    def get_decisions(
+        self,
+        keys: Iterable[Tuple[str, str]],
+    ) -> Dict[Tuple[str, str], Optional[Decision]]:
+        with self._lock:
+            return {key: self._cache.get(key) for key in keys}
+
     def get_reason_or_empty(self, key: Tuple[str, str]) -> str:
         with self._lock:
             d = self._cache.get(key)
             return d.reason if d else ""
+
+    def get_all_decisions(self) -> Dict[Tuple[str, str], Decision]:
+        with self._lock:
+            return dict(self._cache)
 
     def ensure_default_no(
         self,
@@ -218,55 +301,74 @@ class DecisionStore:
     ) -> Tuple[str, str]:
         ts = timestamp_iso or _now_iso()
 
-        a_item_key = self.make_item_key(
-            dataset=a_dataset,
-            subject_id=a_subject_id,
-            session_id=a_session_id,
-            scan_uid=a_scan_uid,
-            src_path=a_src_path,
-        )
-        b_item_key = self.make_item_key(
-            dataset=b_dataset,
-            subject_id=b_subject_id,
-            session_id=b_session_id,
-            scan_uid=b_scan_uid,
-            src_path=b_src_path,
-        )
-        key = _pair_key(a_item_key, b_item_key)
-
-        meta = self._canonicalize_meta(
+        key, meta = self._build_key_and_meta(
             a_dataset=a_dataset,
             a_subject_id=a_subject_id,
             a_session_id=a_session_id,
+            a_scan_uid=a_scan_uid,
             a_src_path=a_src_path,
-            a_item_key=a_item_key,
             b_dataset=b_dataset,
             b_subject_id=b_subject_id,
             b_session_id=b_session_id,
+            b_scan_uid=b_scan_uid,
             b_src_path=b_src_path,
-            b_item_key=b_item_key,
         )
 
         with self._lock:
             if key not in self._cache:
-                self._cache[key] = Decision(
+                self._set_decision_locked(
+                    key=key,
+                    meta=meta,
                     qa_status="no",
                     reason="",
-                    updated_at=ts,
+                    timestamp_iso=ts,
                 )
-                self._meta[key] = meta
+                self._maybe_export_locked()
+            elif key not in self._meta:
+                raise KeyError(f"Missing metadata for existing decision key: {key!r}")
 
-                self._writes_since_export += 1
-                if self._writes_since_export >= self.autosave_every:
-                    self._export_locked()
-                    self._writes_since_export = 0
-            else:
-                if key not in self._meta:
+        return key
+
+    def ensure_default_no_batch(
+        self,
+        rows: Iterable[Dict[str, Any]],
+        timestamp_iso: Optional[str] = None,
+    ) -> List[Tuple[str, str]]:
+        ts = timestamp_iso or _now_iso()
+        keys: List[Tuple[str, str]] = []
+
+        with self._lock:
+            for row in rows:
+                key, meta = self._build_key_and_meta(
+                    a_dataset=row["a_dataset"],
+                    a_subject_id=row["a_subject_id"],
+                    a_session_id=row["a_session_id"],
+                    a_scan_uid=row["a_scan_uid"],
+                    a_src_path=row["a_src_path"],
+                    b_dataset=row["b_dataset"],
+                    b_subject_id=row["b_subject_id"],
+                    b_session_id=row["b_session_id"],
+                    b_scan_uid=row["b_scan_uid"],
+                    b_src_path=row["b_src_path"],
+                )
+                keys.append(key)
+
+                if key not in self._cache:
+                    self._set_decision_locked(
+                        key=key,
+                        meta=meta,
+                        qa_status="no",
+                        reason="",
+                        timestamp_iso=ts,
+                    )
+                elif key not in self._meta:
                     raise KeyError(
                         f"Missing metadata for existing decision key: {key!r}"
                     )
 
-        return key
+            self._maybe_export_locked()
+
+        return keys
 
     def upsert_decision(
         self,
@@ -290,55 +392,77 @@ class DecisionStore:
 
         ts = timestamp_iso or _now_iso()
 
-        a_item_key = self.make_item_key(
-            dataset=a_dataset,
-            subject_id=a_subject_id,
-            session_id=a_session_id,
-            scan_uid=a_scan_uid,
-            src_path=a_src_path,
-        )
-        b_item_key = self.make_item_key(
-            dataset=b_dataset,
-            subject_id=b_subject_id,
-            session_id=b_session_id,
-            scan_uid=b_scan_uid,
-            src_path=b_src_path,
-        )
-        key = _pair_key(a_item_key, b_item_key)
-
-        meta = self._canonicalize_meta(
+        key, meta = self._build_key_and_meta(
             a_dataset=a_dataset,
             a_subject_id=a_subject_id,
             a_session_id=a_session_id,
+            a_scan_uid=a_scan_uid,
             a_src_path=a_src_path,
-            a_item_key=a_item_key,
             b_dataset=b_dataset,
             b_subject_id=b_subject_id,
             b_session_id=b_session_id,
+            b_scan_uid=b_scan_uid,
             b_src_path=b_src_path,
-            b_item_key=b_item_key,
         )
 
-        incoming_reason = _norm(reason)
-
         with self._lock:
-            self._cache[key] = Decision(
+            self._set_decision_locked(
+                key=key,
+                meta=meta,
                 qa_status=qa,
-                reason=incoming_reason,
-                updated_at=ts,
+                reason=reason,
+                timestamp_iso=ts,
             )
-            self._meta[key] = meta
-
-            self._writes_since_export += 1
-            if self._writes_since_export >= self.autosave_every:
-                self._export_locked()
-                self._writes_since_export = 0
+            self._maybe_export_locked()
 
         return key
+
+    def upsert_decisions_batch(
+        self,
+        rows: Iterable[Dict[str, Any]],
+        timestamp_iso: Optional[str] = None,
+    ) -> List[Tuple[str, str]]:
+        ts = timestamp_iso or _now_iso()
+        keys: List[Tuple[str, str]] = []
+
+        with self._lock:
+            for row in rows:
+                qa = _norm(row.get("qa_status")).lower()
+                if qa not in {"yes", "no", "maybe"}:
+                    raise ValueError(
+                        f"Invalid qa_status={row.get('qa_status')!r}, expected yes/no/maybe."
+                    )
+
+                key, meta = self._build_key_and_meta(
+                    a_dataset=row["a_dataset"],
+                    a_subject_id=row["a_subject_id"],
+                    a_session_id=row["a_session_id"],
+                    a_scan_uid=row["a_scan_uid"],
+                    a_src_path=row["a_src_path"],
+                    b_dataset=row["b_dataset"],
+                    b_subject_id=row["b_subject_id"],
+                    b_session_id=row["b_session_id"],
+                    b_scan_uid=row["b_scan_uid"],
+                    b_src_path=row["b_src_path"],
+                )
+                keys.append(key)
+
+                self._set_decision_locked(
+                    key=key,
+                    meta=meta,
+                    qa_status=qa,
+                    reason=_norm(row.get("reason", "")),
+                    timestamp_iso=_norm(row.get("timestamp_iso")) or ts,
+                )
+
+            self._maybe_export_locked()
+
+        return keys
 
     def export(self) -> None:
         with self._lock:
             self._export_locked()
+            self._writes_since_export = 0
 
     def _export_locked(self) -> None:
         self.out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -429,6 +553,10 @@ class DecisionStore:
         with self._lock:
             return list(self._cache.keys())
 
+    def iter_items(self) -> Iterable[Tuple[Tuple[str, str], Decision]]:
+        with self._lock:
+            return list(self._cache.items())
+
     def prune_to_existing_items(self, valid_item_keys: Iterable[str]) -> int:
         valid = {_normalize_path_or_raise("valid_item_key", x) for x in valid_item_keys}
 
@@ -441,4 +569,9 @@ class DecisionStore:
             for key in to_delete:
                 self._cache.pop(key, None)
                 self._meta.pop(key, None)
+
+            if to_delete:
+                self._writes_since_export += 1
+                self._maybe_export_locked()
+
             return len(to_delete)

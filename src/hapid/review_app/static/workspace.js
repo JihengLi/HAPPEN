@@ -48,10 +48,6 @@
     el.classList.toggle("is-hidden", !!hidden);
   }
 
-  function isHidden(el) {
-    return el.classList.contains("is-hidden");
-  }
-
   function buildPngUrl(scanObj) {
     const ds = safeStr(scanObj.dataset).trim();
     const sbj = safeStr(scanObj.subject_id).trim();
@@ -87,6 +83,14 @@
       u.pathname +
       (u.searchParams.toString() ? `?${u.searchParams.toString()}` : "")
     );
+  }
+
+  function getPairKey(cand) {
+    const key = safeStr(cand && cand.pair_key).trim();
+    if (!key) {
+      throw new Error("Missing candidate.pair_key in workspace payload");
+    }
+    return key;
   }
 
   function metaText(scanObj, isCandidate) {
@@ -128,17 +132,13 @@
     );
   }
 
-  function waitForImage(imgEl) {
-    if (isHidden(imgEl)) return Promise.resolve("hidden");
-
-    if (imgEl.complete) {
-      return Promise.resolve(imgEl.naturalWidth > 0 ? "loaded" : "error");
-    }
-
-    return new Promise((resolve) => {
-      imgEl.addEventListener("load", () => resolve("loaded"), { once: true });
-      imgEl.addEventListener("error", () => resolve("error"), { once: true });
-    });
+  function decisionToPlain(entry) {
+    if (!entry) return null;
+    return {
+      qa_status: entry.qa_status,
+      reason: entry.reason,
+      date: entry.serverDate || "",
+    };
   }
 
   const BOOTSTRAP = readInjectedJSON("workspace-bootstrap");
@@ -191,12 +191,6 @@
   const checkCtx = checkCanvas.getContext("2d", { willReadFrequently: true });
   if (!checkCtx) throw new Error("checkCanvas.getContext returned null");
 
-  const scratchCanvas = document.createElement("canvas");
-  const scratchCtx = scratchCanvas.getContext("2d", {
-    willReadFrequently: true,
-  });
-  if (!scratchCtx) throw new Error("scratchCanvas.getContext returned null");
-
   const overlay = document.getElementById("globalLoadingOverlay");
   try {
     sessionStorage.removeItem("navLoading");
@@ -204,25 +198,34 @@
   document.documentElement.classList.remove("nav-loading");
   if (overlay) overlay.classList.add("is-hidden");
 
+  const DIFF_MAX = 64;
+  const CHECK_TILE = 32;
+  const FLUSH_DEBOUNCE_MS = 300;
+
   const state = {
     dataset: safeStr(BOOTSTRAP.dataset).trim(),
     reviewMode: safeStr(BOOTSTRAP.review_mode).trim().toLowerCase(),
+
     subjects: [],
     reviewBySubject: {},
+    datasetDecisionMap: {},
     doneSubjects: 0,
     totalSubjects: 0,
 
-    currentView: "loading", // loading | subjects | review
+    currentView: "loading",
     currentSubjectId: "",
     queryIdx: 0,
     candIdx: 0,
-
     subjectsScrollY: 0,
 
-    busy: false,
     renderVersion: 0,
 
     imageLoadCache: new Map(),
+    lazyPairAssetCache: new Map(),
+    decisionCache: new Map(),
+
+    flushTimer: null,
+    flushInFlight: false,
   };
 
   if (!state.dataset) {
@@ -234,7 +237,6 @@
 
   function showView(viewName) {
     state.currentView = viewName;
-
     setHidden(loadingView, viewName !== "loading");
     setHidden(subjectsView, viewName !== "subjects");
     setHidden(reviewView, viewName !== "review");
@@ -342,58 +344,204 @@
     };
   }
 
-  function pairPayload(a, b) {
-    return { a, b };
+  function getOrCreateDecisionEntry(q, c) {
+    const key = getPairKey(c);
+    let entry = state.decisionCache.get(key);
+
+    if (!entry) {
+      const seeded = state.datasetDecisionMap[key] || null;
+      entry = {
+        key,
+        a: q,
+        b: c,
+        qa_status: seeded
+          ? safeStr(seeded.qa_status).toLowerCase() || "no"
+          : "no",
+        reason:
+          seeded && typeof seeded.reason === "string" ? seeded.reason : "",
+        serverDate: seeded ? safeStr(seeded.date) : "",
+        dirty: false,
+        inflightSave: false,
+        localRevision: 0,
+      };
+      state.decisionCache.set(key, entry);
+    } else {
+      entry.a = q;
+      entry.b = c;
+    }
+
+    return entry;
   }
 
-  async function ensureViewed(a, b) {
-    const res = await postJSON("/api/view", pairPayload(a, b));
-    if (!res.ok) throw new Error("api/view returned not ok");
-    return res;
+  function seedDecisionCacheFromPayload() {
+    for (const subjectId of Object.keys(state.reviewBySubject)) {
+      const payload = state.reviewBySubject[subjectId];
+      const subjectData = Array.isArray(payload.subject_data)
+        ? payload.subject_data
+        : [];
+
+      for (const qb of subjectData) {
+        const q = qb.query;
+        const cands = Array.isArray(qb.candidates) ? qb.candidates : [];
+
+        for (const c of cands) {
+          const key = getPairKey(c);
+          const dj = state.datasetDecisionMap[key] || null;
+
+          state.decisionCache.set(key, {
+            key,
+            a: q,
+            b: c,
+            qa_status: dj ? safeStr(dj.qa_status).toLowerCase() || "no" : "no",
+            reason: dj && typeof dj.reason === "string" ? dj.reason : "",
+            serverDate: dj ? safeStr(dj.date) : "",
+            dirty: false,
+            inflightSave: false,
+            localRevision: 0,
+          });
+        }
+      }
+    }
   }
 
-  async function savePairState(a, b) {
-    const payload = {
-      ...pairPayload(a, b),
-      qa_status: currentSelectedStatus(),
-      reason: reasonBox.value || "",
-    };
-    const res = await postJSON("/api/decision", payload);
-    if (!res.ok) throw new Error("api/decision returned not ok");
-    return res;
-  }
-
-  async function saveCurrentPairState() {
-    if (state.currentView !== "review") return null;
+  function currentPairInfo() {
     const q = currentQuery();
     const c = currentCandidate();
     if (!c) return null;
-    return await savePairState(q, c);
+    const entry = getOrCreateDecisionEntry(q, c);
+    return { q, c, key: entry.key, entry };
   }
 
-  async function setDecision(status) {
+  function captureCurrentPairFromUI() {
     if (state.currentView !== "review") return;
 
-    const q = currentQuery();
-    const c = currentCandidate();
-    if (!c) return;
+    const info = currentPairInfo();
+    if (!info) return;
 
-    setSelected(status);
+    const status = currentSelectedStatus();
+    const reason = reasonBox.value || "";
 
-    const payload = {
-      ...pairPayload(q, c),
-      qa_status: status,
-      reason: reasonBox.value || "",
-    };
-    const res = await postJSON("/api/decision", payload);
-    if (!res.ok) throw new Error("api/decision returned not ok");
+    if (info.entry.qa_status === status && info.entry.reason === reason) {
+      return;
+    }
 
-    applyDecisionToUI(res.decision || null);
+    info.entry.qa_status = status;
+    info.entry.reason = reason;
+    info.entry.dirty = true;
+    info.entry.localRevision += 1;
+
+    scheduleFlushDirtyPairs();
+  }
+
+  function setDecisionLocal(status) {
+    const info = currentPairInfo();
+    if (!info) return;
+
+    const nextStatus = safeStr(status).toLowerCase();
+    if (!["yes", "no", "maybe"].includes(nextStatus)) return;
+
+    setSelected(nextStatus);
+
+    if (
+      info.entry.qa_status === nextStatus &&
+      info.entry.reason === (reasonBox.value || "")
+    ) {
+      return;
+    }
+
+    info.entry.qa_status = nextStatus;
+    info.entry.reason = reasonBox.value || "";
+    info.entry.dirty = true;
+    info.entry.localRevision += 1;
+
+    scheduleFlushDirtyPairs();
+  }
+
+  async function flushDirtyPairs() {
+    if (state.flushInFlight) return;
+    state.flushInFlight = true;
+
+    try {
+      while (true) {
+        const dirtyEntries = Array.from(state.decisionCache.values()).filter(
+          (entry) => entry.dirty && !entry.inflightSave,
+        );
+
+        if (dirtyEntries.length === 0) break;
+
+        const revisions = new Map();
+        for (const entry of dirtyEntries) {
+          entry.inflightSave = true;
+          revisions.set(entry.key, entry.localRevision);
+        }
+
+        const payload = {
+          updates: dirtyEntries.map((entry) => ({
+            a: entry.a,
+            b: entry.b,
+            qa_status: entry.qa_status,
+            reason: entry.reason,
+          })),
+        };
+
+        try {
+          const res = await postJSON("/api/flush_decisions", payload);
+          const decisionMap =
+            res && typeof res === "object" && res.decision_map
+              ? res.decision_map
+              : {};
+
+          for (const entry of dirtyEntries) {
+            const rev = revisions.get(entry.key);
+            if (entry.localRevision === rev) {
+              entry.dirty = false;
+
+              const dj = decisionMap[entry.key];
+              if (dj) {
+                entry.qa_status =
+                  safeStr(dj.qa_status).toLowerCase() || entry.qa_status;
+                entry.reason =
+                  typeof dj.reason === "string" ? dj.reason : entry.reason;
+                entry.serverDate = safeStr(dj.date);
+              }
+            }
+          }
+        } catch (err) {
+          console.warn("[workspace] flushDirtyPairs failed:", err);
+        } finally {
+          for (const entry of dirtyEntries) {
+            entry.inflightSave = false;
+          }
+        }
+      }
+    } finally {
+      state.flushInFlight = false;
+    }
+  }
+
+  function scheduleFlushDirtyPairs(delay = FLUSH_DEBOUNCE_MS) {
+    if (state.flushTimer !== null) {
+      clearTimeout(state.flushTimer);
+    }
+
+    state.flushTimer = window.setTimeout(() => {
+      state.flushTimer = null;
+      void flushDirtyPairs();
+    }, delay);
+  }
+
+  async function flushAllDirtyPairs() {
+    if (state.flushTimer !== null) {
+      clearTimeout(state.flushTimer);
+      state.flushTimer = null;
+    }
+    await flushDirtyPairs();
   }
 
   async function fetchWorkspaceDataset() {
     const u = new URL(WORKSPACE_API_URL, window.location.origin);
     u.searchParams.set("dataset", state.dataset);
+    u.searchParams.set("include_subject_data", "1");
 
     const resp = await fetch(u.toString(), { method: "GET" });
     if (!resp.ok) {
@@ -411,8 +559,15 @@
     state.reviewMode = safeStr(data.review_mode).trim().toLowerCase();
     state.subjects = Array.isArray(data.subjects) ? data.subjects : [];
     state.reviewBySubject = data.review_by_subject || {};
+    state.datasetDecisionMap =
+      data && typeof data === "object" && data.decision_map
+        ? data.decision_map
+        : {};
     state.doneSubjects = Number(data.done_subjects) || 0;
     state.totalSubjects = Number(data.total_subjects) || 0;
+
+    state.decisionCache.clear();
+    seedDecisionCacheFromPayload();
   }
 
   function collectPngUrls() {
@@ -429,8 +584,8 @@
           urls.add(buildPngUrl(qb.query));
         }
         const cands = Array.isArray(qb.candidates) ? qb.candidates : [];
-        for (const cand of cands) {
-          urls.add(buildPngUrl(cand));
+        for (const c of cands) {
+          urls.add(buildPngUrl(c));
         }
       }
     }
@@ -438,12 +593,9 @@
     return Array.from(urls);
   }
 
-  function collectPairAssetUrls() {
-    if (state.reviewMode !== "precompute") {
-      return [];
-    }
-
-    const urls = new Set();
+  function collectAllPairs() {
+    const pairs = [];
+    const seen = new Set();
 
     for (const subjectId of Object.keys(state.reviewBySubject)) {
       const payload = state.reviewBySubject[subjectId];
@@ -452,19 +604,49 @@
         : [];
 
       for (const qb of subjectData) {
-        if (!qb.query) continue;
         const q = qb.query;
+        if (!q) continue;
+
+        const qUrl = buildPngUrl(q);
         const cands = Array.isArray(qb.candidates) ? qb.candidates : [];
-        for (const cand of cands) {
-          urls.add(buildPairAssetUrl("diff", q.scan_uid, cand.scan_uid));
-          urls.add(
-            buildPairAssetUrl("checkerboard", q.scan_uid, cand.scan_uid),
-          );
+
+        for (const c of cands) {
+          const key = getPairKey(c);
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          pairs.push({
+            key,
+            q,
+            c,
+            qUrl,
+            cUrl: buildPngUrl(c),
+            diffUrl: buildPairAssetUrl("diff", q.scan_uid, c.scan_uid),
+            checkUrl: buildPairAssetUrl("checkerboard", q.scan_uid, c.scan_uid),
+          });
         }
       }
     }
 
-    return Array.from(urls);
+    return pairs;
+  }
+
+  async function loadImageUrl(url) {
+    if (!url) return Promise.resolve({ status: "error", img: null, url: "" });
+
+    if (state.imageLoadCache.has(url)) {
+      return state.imageLoadCache.get(url);
+    }
+
+    const p = new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ status: "loaded", img, url });
+      img.onerror = () => resolve({ status: "error", img: null, url });
+      img.src = url;
+    });
+
+    state.imageLoadCache.set(url, p);
+    return p;
   }
 
   async function preloadUrls(
@@ -507,13 +689,219 @@
     return doneStart + completed;
   }
 
+  function makeWorkingCanvas(w, h) {
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    return canvas;
+  }
+
+  async function buildLazyPairAssets(pair, onStepDone = null) {
+    if (state.lazyPairAssetCache.has(pair.key)) {
+      return state.lazyPairAssetCache.get(pair.key);
+    }
+
+    const [qRes, cRes] = await Promise.all([
+      loadImageUrl(pair.qUrl),
+      loadImageUrl(pair.cUrl),
+    ]);
+
+    if (qRes.status !== "loaded" || cRes.status !== "loaded") {
+      const failed = { status: "error" };
+      state.lazyPairAssetCache.set(pair.key, failed);
+      return failed;
+    }
+
+    const qImg = qRes.img;
+    const cImg = cRes.img;
+
+    const w = qImg.naturalWidth || qImg.width;
+    const h = qImg.naturalHeight || qImg.height;
+
+    if (!w || !h) {
+      const failed = { status: "error" };
+      state.lazyPairAssetCache.set(pair.key, failed);
+      return failed;
+    }
+
+    if (
+      (cImg.naturalWidth || cImg.width) !== w ||
+      (cImg.naturalHeight || cImg.height) !== h
+    ) {
+      const failed = { status: "error" };
+      state.lazyPairAssetCache.set(pair.key, failed);
+      return failed;
+    }
+
+    const qCanvas = makeWorkingCanvas(w, h);
+    const cCanvas = makeWorkingCanvas(w, h);
+    const diffCanvasWork = makeWorkingCanvas(w, h);
+    const checkCanvasWork = makeWorkingCanvas(w, h);
+
+    const qCtx = qCanvas.getContext("2d", { willReadFrequently: true });
+    const cCtx = cCanvas.getContext("2d", { willReadFrequently: true });
+    const dCtx = diffCanvasWork.getContext("2d", { willReadFrequently: true });
+    const chCtx = checkCanvasWork.getContext("2d", {
+      willReadFrequently: true,
+    });
+
+    if (!qCtx || !cCtx || !dCtx || !chCtx) {
+      const failed = { status: "error" };
+      state.lazyPairAssetCache.set(pair.key, failed);
+      return failed;
+    }
+
+    qCtx.drawImage(qImg, 0, 0);
+    cCtx.drawImage(cImg, 0, 0);
+
+    const qData = qCtx.getImageData(0, 0, w, h);
+    const cData = cCtx.getImageData(0, 0, w, h);
+
+    const qd = qData.data;
+    const cd = cData.data;
+
+    const diffOut = dCtx.createImageData(w, h);
+    const dd = diffOut.data;
+
+    for (let i = 0; i < dd.length; i += 4) {
+      const vq = qd[i];
+      const vc = cd[i];
+      const d = vq - vc;
+      const t = clamp(d / DIFF_MAX, -1, 1);
+
+      let r, g, b;
+      if (t >= 0) {
+        const k = 1 - t;
+        r = 255;
+        g = Math.round(255 * k);
+        b = Math.round(255 * k);
+      } else {
+        const k = 1 + t;
+        r = Math.round(255 * k);
+        g = Math.round(255 * k);
+        b = 255;
+      }
+
+      dd[i] = r;
+      dd[i + 1] = g;
+      dd[i + 2] = b;
+      dd[i + 3] = 255;
+    }
+
+    dCtx.putImageData(diffOut, 0, 0);
+
+    if (onStepDone) {
+      await onStepDone();
+    }
+
+    const checkOut = chCtx.createImageData(w, h);
+    const od = checkOut.data;
+
+    for (let y = 0; y < h; y++) {
+      const by = Math.floor(y / CHECK_TILE);
+      for (let x = 0; x < w; x++) {
+        const bx = Math.floor(x / CHECK_TILE);
+        const useQuery = ((bx + by) & 1) === 0;
+        const idx = (y * w + x) * 4;
+        const src = useQuery ? qd : cd;
+
+        od[idx] = src[idx];
+        od[idx + 1] = src[idx + 1];
+        od[idx + 2] = src[idx + 2];
+        od[idx + 3] = 255;
+      }
+    }
+
+    chCtx.putImageData(checkOut, 0, 0);
+
+    if (onStepDone) {
+      await onStepDone();
+    }
+
+    let diffSource = diffCanvasWork;
+    let checkSource = checkCanvasWork;
+
+    if (typeof createImageBitmap === "function") {
+      try {
+        diffSource = await createImageBitmap(diffCanvasWork);
+        checkSource = await createImageBitmap(checkCanvasWork);
+      } catch (e) {
+        // keep canvas fallback
+      }
+    }
+
+    const built = {
+      status: "loaded",
+      width: w,
+      height: h,
+      diffSource,
+      checkSource,
+    };
+    state.lazyPairAssetCache.set(pair.key, built);
+    return built;
+  }
+
+  async function preloadLazyPairAssets(
+    pairs,
+    stageLabel,
+    doneStart,
+    totalAll,
+    concurrency = 4,
+  ) {
+    if (!Array.isArray(pairs) || pairs.length === 0) {
+      return doneStart;
+    }
+
+    let completed = 0;
+    let cursor = 0;
+    let lastUiTs = 0;
+
+    async function stepDone() {
+      completed += 1;
+
+      const now = performance.now();
+      if (now - lastUiTs >= 33 || doneStart + completed >= totalAll) {
+        lastUiTs = now;
+        setLoadingStage(stageLabel);
+        setLoadingProgress(doneStart + completed, totalAll);
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    }
+
+    async function worker() {
+      while (cursor < pairs.length) {
+        const idx = cursor++;
+        const pair = pairs[idx];
+        try {
+          await buildLazyPairAssets(pair, stepDone);
+        } catch (e) {
+          console.warn("[workspace lazy asset build] failed:", pair.key, e);
+          await stepDone();
+          await stepDone();
+        }
+      }
+    }
+
+    const workers = [];
+    const n = Math.max(1, Math.min(concurrency, pairs.length));
+    for (let i = 0; i < n; i += 1) {
+      workers.push(worker());
+    }
+
+    await Promise.all(workers);
+
+    setLoadingStage(stageLabel);
+    setLoadingProgress(doneStart + completed, totalAll);
+    return doneStart + completed;
+  }
+
   async function preloadWorkspaceAssets() {
     setLoadingStage("Preparing workspace data...");
     setLoadingProgress(0, 1);
 
     const pngUrls = collectPngUrls();
-    const pairUrls = collectPairAssetUrls();
-    const totalAll = pngUrls.length + pairUrls.length;
+    const allPairs = collectAllPairs();
+    const totalAll = pngUrls.length + allPairs.length * 2;
 
     if (totalAll === 0) {
       setLoadingProgress(1, 1);
@@ -530,13 +918,25 @@
       8,
     );
 
-    if (pairUrls.length > 0) {
+    if (state.reviewMode === "precompute") {
+      const pairUrls = [];
+      for (const pair of allPairs) {
+        pairUrls.push(pair.diffUrl, pair.checkUrl);
+      }
       done = await preloadUrls(
         pairUrls,
         "Preloading review assets...",
         done,
         totalAll,
         8,
+      );
+    } else {
+      done = await preloadLazyPairAssets(
+        allPairs,
+        "Computing review assets...",
+        done,
+        totalAll,
+        4,
       );
     }
 
@@ -611,55 +1011,10 @@
 
   function enterSubjectsView() {
     renderSubjectsView();
-
     requestAnimationFrame(() => {
       window.scrollTo(0, state.subjectsScrollY || 0);
     });
   }
-
-  async function enterReviewView(
-    subjectId,
-    {
-      queryIdx = 0,
-      scrollMode = "preserve", // "top" | "preserve"
-    } = {},
-  ) {
-    subjectId = safeStr(subjectId).trim();
-    if (!subjectId) {
-      throw new Error("enterReviewView missing subjectId");
-    }
-    if (!state.reviewBySubject[subjectId]) {
-      throw new Error(`Missing subject payload: ${subjectId}`);
-    }
-
-    if (scrollMode === "top") {
-      window.scrollTo(0, 0);
-    }
-
-    state.currentSubjectId = subjectId;
-    state.queryIdx = queryIdx;
-    state.candIdx = 0;
-
-    reviewDataset.textContent = state.dataset;
-    reviewSubjectId.textContent = subjectId;
-
-    showView("review");
-    updateTitle();
-
-    initQuerySelect();
-    setSelectValueStrict(querySel, String(state.queryIdx));
-    setSelected("no");
-    reasonBox.value = "";
-
-    await renderAll();
-
-    if (scrollMode === "top") {
-      window.scrollTo(0, 0);
-    }
-  }
-
-  const DIFF_MAX = 64;
-  const CHECK_TILE = 32;
 
   function showMissing(canvasEl, missingEl, msg) {
     setHidden(canvasEl, true);
@@ -672,23 +1027,10 @@
     setHidden(canvasEl, false);
   }
 
-  function signedToRGB(t) {
-    t = clamp(t, -1, 1);
-    if (t >= 0) {
-      const k = 1 - t;
-      return [255, Math.round(255 * k), Math.round(255 * k)];
-    } else {
-      const k = 1 + t;
-      return [Math.round(255 * k), Math.round(255 * k), 255];
-    }
-  }
-
-  function readImageData(imgEl, w, h) {
-    scratchCanvas.width = w;
-    scratchCanvas.height = h;
-    scratchCtx.clearRect(0, 0, w, h);
-    scratchCtx.drawImage(imgEl, 0, 0);
-    return scratchCtx.getImageData(0, 0, w, h);
+  function showPanelLoading(canvasEl, missingEl, msg) {
+    setHidden(canvasEl, true);
+    setHidden(missingEl, false);
+    missingEl.textContent = msg;
   }
 
   function drawLoadedImageToCanvas(img, canvasEl, ctx, missingEl) {
@@ -706,90 +1048,30 @@
     showCanvas(canvasEl, missingEl);
   }
 
-  function computeAndRenderDiffAndCheckerLocal() {
-    if (!queryImg.complete || !candImg.complete) return false;
-
-    if (isHidden(queryImg) || isHidden(candImg)) {
-      showMissing(diffCanvas, diffMissing, "(Diff unavailable)");
-      showMissing(checkCanvas, checkMissing, "(Checkerboard unavailable)");
-      return false;
+  function drawCachedSourceToCanvas(
+    source,
+    width,
+    height,
+    canvasEl,
+    ctx,
+    missingEl,
+  ) {
+    if (!source || !width || !height) {
+      showMissing(canvasEl, missingEl, "(Unavailable)");
+      return;
     }
 
-    if (queryImg.naturalWidth <= 0 || queryImg.naturalHeight <= 0) {
-      return false;
-    }
-    if (candImg.naturalWidth <= 0 || candImg.naturalHeight <= 0) {
-      return false;
-    }
-
-    if (
-      queryImg.naturalWidth !== candImg.naturalWidth ||
-      queryImg.naturalHeight !== candImg.naturalHeight
-    ) {
-      throw new Error(
-        `Image size mismatch: query=${queryImg.naturalWidth}x${queryImg.naturalHeight}, cand=${candImg.naturalWidth}x${candImg.naturalHeight}`,
-      );
-    }
-
-    const w = queryImg.naturalWidth;
-    const h = queryImg.naturalHeight;
-
-    const q = readImageData(queryImg, w, h);
-    const c = readImageData(candImg, w, h);
-
-    const qd = q.data;
-    const cd = c.data;
-
-    diffCanvas.width = w;
-    diffCanvas.height = h;
-
-    const diffOut = new ImageData(w, h);
-    const dd = diffOut.data;
-
-    for (let i = 0; i < dd.length; i += 4) {
-      const vq = qd[i];
-      const vc = cd[i];
-      const d = vq - vc;
-      const t = clamp(d / DIFF_MAX, -1, 1);
-      const [r, g, b] = signedToRGB(t);
-
-      dd[i] = r;
-      dd[i + 1] = g;
-      dd[i + 2] = b;
-      dd[i + 3] = 255;
-    }
-
-    diffCtx.putImageData(diffOut, 0, 0);
-    showCanvas(diffCanvas, diffMissing);
-
-    checkCanvas.width = w;
-    checkCanvas.height = h;
-
-    const chkOut = new ImageData(w, h);
-    const od = chkOut.data;
-
-    for (let y = 0; y < h; y++) {
-      const by = Math.floor(y / CHECK_TILE);
-      for (let x = 0; x < w; x++) {
-        const bx = Math.floor(x / CHECK_TILE);
-        const useQuery = ((bx + by) & 1) === 0;
-
-        const idx = (y * w + x) * 4;
-        const src = useQuery ? qd : cd;
-
-        od[idx] = src[idx];
-        od[idx + 1] = src[idx + 1];
-        od[idx + 2] = src[idx + 2];
-        od[idx + 3] = 255;
-      }
-    }
-
-    checkCtx.putImageData(chkOut, 0, 0);
-    showCanvas(checkCanvas, checkMissing);
-    return true;
+    canvasEl.width = width;
+    canvasEl.height = height;
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(source, 0, 0);
+    showCanvas(canvasEl, missingEl);
   }
 
   function setImgOrMissing(imgEl, missingEl, url) {
+    if (imgEl.dataset.currentUrl === url) return;
+
+    imgEl.dataset.currentUrl = url;
     setHidden(missingEl, true);
     setHidden(imgEl, false);
 
@@ -848,28 +1130,35 @@
       return;
     }
 
-    if (state.reviewMode === "lazy") {
-      const [qStatus, cStatus] = await Promise.all([
-        waitForImage(queryImg),
-        waitForImage(candImg),
-      ]);
-
+    const cached = state.lazyPairAssetCache.get(getPairKey(c));
+    if (!cached || cached.status !== "loaded") {
       if (version !== state.renderVersion) return;
-
-      if (qStatus === "loaded" && cStatus === "loaded") {
-        const ok = computeAndRenderDiffAndCheckerLocal();
-        if (ok) return;
-      }
-
       showMissing(diffCanvas, diffMissing, "(Diff unavailable)");
       showMissing(checkCanvas, checkMissing, "(Checkerboard unavailable)");
       return;
     }
 
-    throw new Error(`Unhandled review_mode: ${state.reviewMode}`);
+    if (version !== state.renderVersion) return;
+
+    drawCachedSourceToCanvas(
+      cached.diffSource,
+      cached.width,
+      cached.height,
+      diffCanvas,
+      diffCtx,
+      diffMissing,
+    );
+    drawCachedSourceToCanvas(
+      cached.checkSource,
+      cached.width,
+      cached.height,
+      checkCanvas,
+      checkCtx,
+      checkMissing,
+    );
   }
 
-  async function renderAll() {
+  function renderCurrentPair() {
     const version = ++state.renderVersion;
 
     const qb = currentQueryBlock();
@@ -880,6 +1169,7 @@
     const total = cands.length;
     const idx1 =
       total > 0 ? (((state.candIdx % total) + total) % total) + 1 : 0;
+
     candCounter.textContent = total > 0 ? `${idx1} / ${total}` : "0 / 0";
     diffCounter.textContent = candCounter.textContent;
     checkCounter.textContent = candCounter.textContent;
@@ -887,44 +1177,78 @@
     queryMeta.textContent = metaText(q, false);
     setImgOrMissing(queryImg, queryMissing, buildPngUrl(q));
 
-    if (c) {
-      candMeta.textContent = metaText(c, true);
-      setImgOrMissing(candImg, candMissing, buildPngUrl(c));
-
-      const res = await ensureViewed(q, c);
-      if (version !== state.renderVersion) return;
-      applyDecisionToUI(res.decision || null);
-    } else {
+    if (!c) {
       candMeta.textContent = "No candidates for this query.\n\u00A0";
       setHidden(candImg, true);
       setHidden(candMissing, false);
       candMissing.textContent = "(No candidates)";
       applyDecisionToUI(null);
-
       showMissing(diffCanvas, diffMissing, "(Diff unavailable)");
       showMissing(checkCanvas, checkMissing, "(Checkerboard unavailable)");
       return;
     }
 
-    await renderDerivedPanels(version, q, c);
+    candMeta.textContent = metaText(c, true);
+    setImgOrMissing(candImg, candMissing, buildPngUrl(c));
+
+    const entry = getOrCreateDecisionEntry(q, c);
+    applyDecisionToUI(decisionToPlain(entry));
+
+    showPanelLoading(diffCanvas, diffMissing, "(Loading...)");
+    showPanelLoading(checkCanvas, checkMissing, "(Loading...)");
+
+    void renderDerivedPanels(version, q, c);
   }
 
-  async function moveCandidate(delta) {
-    const c = currentCandidate();
-    const cands = currentCandidates();
-    if (!c || cands.length === 0) return;
+  function enterReviewView(
+    subjectId,
+    { queryIdx = 0, scrollMode = "preserve" } = {},
+  ) {
+    subjectId = safeStr(subjectId).trim();
+    if (!subjectId) {
+      throw new Error("enterReviewView missing subjectId");
+    }
+    if (!state.reviewBySubject[subjectId]) {
+      throw new Error(`Missing subject payload: ${subjectId}`);
+    }
 
-    await saveCurrentPairState();
+    if (scrollMode === "top") {
+      window.scrollTo(0, 0);
+    }
+
+    state.currentSubjectId = subjectId;
+    state.queryIdx = queryIdx;
+    state.candIdx = 0;
+
+    reviewDataset.textContent = state.dataset;
+    reviewSubjectId.textContent = subjectId;
+
+    showView("review");
+    updateTitle();
+
+    initQuerySelect();
+    setSelectValueStrict(querySel, String(state.queryIdx));
+    renderCurrentPair();
+
+    if (scrollMode === "top") {
+      window.scrollTo(0, 0);
+    }
+  }
+
+  function moveCandidate(delta) {
+    const cands = currentCandidates();
+    if (!cands || cands.length === 0) return;
+
+    captureCurrentPairFromUI();
 
     state.candIdx = (state.candIdx + delta) % cands.length;
     if (state.candIdx < 0) state.candIdx += cands.length;
 
-    await renderAll();
+    renderCurrentPair();
   }
 
-  async function changeQuery(newIdx) {
-    const oldC = currentCandidate();
-    if (oldC) await saveCurrentPairState();
+  function changeQuery(newIdx) {
+    captureCurrentPairFromUI();
 
     const total = currentSubjectData().length;
     if (newIdx < 0 || newIdx >= total) {
@@ -935,25 +1259,26 @@
     state.candIdx = 0;
 
     setSelectValueStrict(querySel, String(state.queryIdx));
-    await renderAll();
+    renderCurrentPair();
   }
 
-  async function moveQuery(delta) {
+  function moveQuery(delta) {
+    captureCurrentPairFromUI();
+
     const totalQueries = currentSubjectData().length;
 
     if (delta < 0) {
       if (state.queryIdx > 0) {
-        await changeQuery(state.queryIdx - 1);
+        changeQuery(state.queryIdx - 1);
         return;
       }
 
       const nav = currentSubjectNav();
       if (nav.prev) {
-        await saveCurrentPairState();
         const prevTotal = (state.reviewBySubject[nav.prev]?.subject_data || [])
           .length;
         const newQueryIdx = prevTotal > 0 ? prevTotal - 1 : 0;
-        await enterReviewView(nav.prev, {
+        enterReviewView(nav.prev, {
           queryIdx: newQueryIdx,
           scrollMode: "preserve",
         });
@@ -963,14 +1288,13 @@
 
     if (delta > 0) {
       if (state.queryIdx < totalQueries - 1) {
-        await changeQuery(state.queryIdx + 1);
+        changeQuery(state.queryIdx + 1);
         return;
       }
 
       const nav = currentSubjectNav();
       if (nav.next) {
-        await saveCurrentPairState();
-        await enterReviewView(nav.next, {
+        enterReviewView(nav.next, {
           queryIdx: 0,
           scrollMode: "preserve",
         });
@@ -978,44 +1302,18 @@
     }
   }
 
-  async function loadImageUrl(url) {
-    if (!url) {
-      return Promise.resolve({ status: "error", img: null, url: "" });
-    }
-
-    if (state.imageLoadCache.has(url)) {
-      return state.imageLoadCache.get(url);
-    }
-
-    const p = new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => resolve({ status: "loaded", img, url });
-      img.onerror = () => resolve({ status: "error", img: null, url });
-      img.src = url;
-    });
-
-    state.imageLoadCache.set(url, p);
-    return p;
-  }
-
-  async function guarded(fn) {
-    if (state.busy) return;
-    state.busy = true;
-    try {
-      await fn();
-    } finally {
-      state.busy = false;
-    }
-  }
-
   async function backToSubjects() {
-    await saveCurrentPairState();
+    captureCurrentPairFromUI();
+    await flushAllDirtyPairs();
     await fetchWorkspaceDataset();
     enterSubjectsView();
   }
 
   function backToDatasets() {
-    window.location.assign(DATASETS_INDEX_URL);
+    captureCurrentPairFromUI();
+    void flushAllDirtyPairs().finally(() => {
+      window.location.assign(DATASETS_INDEX_URL);
+    });
   }
 
   async function bootstrapWorkspace() {
@@ -1038,8 +1336,7 @@
       const initialQueryIdx = initialQueryIdxFromURL(total);
 
       state.subjectsScrollY = 0;
-
-      await enterReviewView(initialSubjectId, {
+      enterReviewView(initialSubjectId, {
         queryIdx: initialQueryIdx,
         scrollMode: "top",
       });
@@ -1055,12 +1352,10 @@
     const subjectId = safeStr(item.dataset.subjectId).trim();
     if (!subjectId) return;
 
-    guarded(async () => {
-      saveSubjectsScroll();
-      await enterReviewView(subjectId, {
-        queryIdx: 0,
-        scrollMode: "top",
-      });
+    saveSubjectsScroll();
+    enterReviewView(subjectId, {
+      queryIdx: 0,
+      scrollMode: "top",
     });
   });
 
@@ -1074,98 +1369,78 @@
     const subjectId = safeStr(item.dataset.subjectId).trim();
     if (!subjectId) return;
 
-    guarded(async () => {
-      saveSubjectsScroll();
-      await enterReviewView(subjectId, {
-        queryIdx: 0,
-        scrollMode: "top",
-      });
+    saveSubjectsScroll();
+    enterReviewView(subjectId, {
+      queryIdx: 0,
+      scrollMode: "top",
     });
   });
 
-  btnBackToSubjects.addEventListener("click", () =>
-    guarded(async () => {
-      await backToSubjects();
-    }),
-  );
+  btnBackToSubjects.addEventListener("click", () => {
+    void backToSubjects().catch((err) => {
+      console.error(err);
+    });
+  });
 
   btnBackToDatasets.addEventListener("click", () => {
     backToDatasets();
   });
 
-  querySel.addEventListener("change", () =>
-    guarded(async () => {
-      const idx = parseInt(querySel.value, 10);
-      if (!Number.isFinite(idx)) {
-        throw new Error(`Bad querySel value: ${querySel.value}`);
-      }
-      await changeQuery(idx);
-    }),
-  );
+  querySel.addEventListener("change", () => {
+    const idx = parseInt(querySel.value, 10);
+    if (!Number.isFinite(idx)) {
+      throw new Error(`Bad querySel value: ${querySel.value}`);
+    }
+    changeQuery(idx);
+  });
 
-  btnYes.addEventListener("click", () =>
-    guarded(async () => {
-      await setDecision("yes");
-    }),
-  );
+  btnYes.addEventListener("click", () => {
+    setDecisionLocal("yes");
+  });
 
-  btnNo.addEventListener("click", () =>
-    guarded(async () => {
-      await setDecision("no");
-    }),
-  );
+  btnNo.addEventListener("click", () => {
+    setDecisionLocal("no");
+  });
 
-  btnMaybe.addEventListener("click", () =>
-    guarded(async () => {
-      await setDecision("maybe");
-    }),
-  );
+  btnMaybe.addEventListener("click", () => {
+    setDecisionLocal("maybe");
+  });
 
-  reasonBox.addEventListener("keydown", (e) =>
-    guarded(async () => {
-      if (e.key !== "Enter") return;
-      if (e.shiftKey) {
-        return;
-      }
+  reasonBox.addEventListener("input", () => {
+    captureCurrentPairFromUI();
+  });
 
-      e.preventDefault();
-
-      const res = await saveCurrentPairState();
-      if (res && res.decision) {
-        applyDecisionToUI(res.decision);
-      }
-    }),
-  );
+  reasonBox.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.shiftKey) return;
+    e.preventDefault();
+    captureCurrentPairFromUI();
+    scheduleFlushDirtyPairs(0);
+  });
 
   document.addEventListener("keydown", (e) => {
     const tag =
       e.target && e.target.tagName ? e.target.tagName.toLowerCase() : "";
     const isTyping = tag === "textarea" || tag === "input" || tag === "select";
     if (isTyping) return;
-
     if (state.currentView !== "review") return;
 
     if (e.key === "ArrowLeft") {
       e.preventDefault();
-      guarded(async () => {
-        await moveCandidate(-1);
-      });
+      moveCandidate(-1);
     } else if (e.key === "ArrowRight") {
       e.preventDefault();
-      guarded(async () => {
-        await moveCandidate(+1);
-      });
+      moveCandidate(+1);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      guarded(async () => {
-        await moveQuery(-1);
-      });
+      moveQuery(-1);
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      guarded(async () => {
-        await moveQuery(+1);
-      });
+      moveQuery(+1);
     }
+  });
+
+  window.addEventListener("beforeunload", () => {
+    captureCurrentPairFromUI();
   });
 
   bootstrapWorkspace().catch((err) => {

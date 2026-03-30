@@ -6,7 +6,7 @@ Email: jiheng.li.1@vanderbilt.edu
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, TypeAlias
+from typing import Any, Dict, List, Optional, Tuple
 
 from flask import (
     Flask,
@@ -26,12 +26,19 @@ from .workspace import (
 )
 
 
-ScanPayload: TypeAlias = Dict[str, str]
-PairPayload: TypeAlias = Dict[str, Any]
-
-
 def _clean(s: Optional[str]) -> str:
     return (s or "").strip()
+
+
+def _parse_boolish(s: Optional[str], default: bool = True) -> bool:
+    if s is None:
+        return default
+    t = _clean(s).lower()
+    if t in {"1", "true", "yes", "y", "on"}:
+        return True
+    if t in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 def _pair_key(scan_uid_a: str, scan_uid_b: str) -> str:
@@ -93,61 +100,106 @@ def _resolve_pair_asset_path(
     return path
 
 
-def _pair_payload_ok(payload: PairPayload) -> bool:
-    return (
-        isinstance(payload, dict)
-        and "a" in payload
-        and "b" in payload
-        and isinstance(payload["a"], dict)
-        and isinstance(payload["b"], dict)
-    )
+def _extract_pair_rows_from_batch_payload(
+    payload: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        abort(400, "Bad payload")
 
+    updates = payload.get("updates")
+    if not isinstance(updates, list):
+        abort(400, "Payload must contain list field 'updates'")
 
-def _extract_pair_fields(payload: PairPayload) -> Tuple[ScanPayload, ScanPayload]:
-    a0 = payload.get("a", {})
-    b0 = payload.get("b", {})
+    rows: List[Dict[str, Any]] = []
 
-    a: ScanPayload = {
-        "dataset": _clean(a0.get("dataset")),
-        "subject_id": _clean(a0.get("subject_id")),
-        "session_id": _clean(a0.get("session_id")),
-        "scan_uid": _clean(a0.get("scan_uid")),
-        "src_path": _clean(a0.get("src_path")),
-    }
-    b: ScanPayload = {
-        "dataset": _clean(b0.get("dataset")),
-        "subject_id": _clean(b0.get("subject_id")),
-        "session_id": _clean(b0.get("session_id")),
-        "scan_uid": _clean(b0.get("scan_uid")),
-        "src_path": _clean(b0.get("src_path")),
-    }
+    for idx, item in enumerate(updates):
+        if not isinstance(item, dict):
+            abort(400, f"Bad update at updates[{idx}]")
 
-    if not (
-        a["dataset"]
-        and a["subject_id"]
-        and a["scan_uid"]
-        and a["src_path"]
-        and b["dataset"]
-        and b["subject_id"]
-        and b["scan_uid"]
-        and b["src_path"]
-    ):
-        abort(
-            400,
-            "Missing required fields in pair (dataset/subject_id/scan_uid/src_path)",
+        a0 = item.get("a")
+        b0 = item.get("b")
+        if not isinstance(a0, dict) or not isinstance(b0, dict):
+            abort(400, f"Bad pair payload at updates[{idx}]")
+
+        a_dataset = _clean(a0.get("dataset"))
+        a_subject_id = _clean(a0.get("subject_id"))
+        a_session_id = _clean(a0.get("session_id"))
+        a_scan_uid = _clean(a0.get("scan_uid"))
+        a_src_path = _clean(a0.get("src_path"))
+
+        b_dataset = _clean(b0.get("dataset"))
+        b_subject_id = _clean(b0.get("subject_id"))
+        b_session_id = _clean(b0.get("session_id"))
+        b_scan_uid = _clean(b0.get("scan_uid"))
+        b_src_path = _clean(b0.get("src_path"))
+
+        if not (
+            a_dataset
+            and a_subject_id
+            and a_scan_uid
+            and a_src_path
+            and b_dataset
+            and b_subject_id
+            and b_scan_uid
+            and b_src_path
+        ):
+            abort(
+                400,
+                f"Missing required fields in updates[{idx}] "
+                "(dataset/subject_id/scan_uid/src_path)",
+            )
+
+        qa_status = _clean(item.get("qa_status", "")).lower()
+        reason = _clean(item.get("reason", ""))
+
+        rows.append(
+            {
+                "a_dataset": a_dataset,
+                "a_subject_id": a_subject_id,
+                "a_session_id": a_session_id,
+                "a_scan_uid": a_scan_uid,
+                "a_src_path": a_src_path,
+                "b_dataset": b_dataset,
+                "b_subject_id": b_subject_id,
+                "b_session_id": b_session_id,
+                "b_scan_uid": b_scan_uid,
+                "b_src_path": b_src_path,
+                "qa_status": qa_status,
+                "reason": reason,
+            }
         )
 
-    return a, b
+    return rows
 
 
-def _decision_to_json(decision: Any) -> Optional[Dict[str, str]]:
-    if decision is None:
-        return None
-    return {
-        "qa_status": decision.qa_status,
-        "reason": decision.reason,
-        "date": decision.updated_at,
-    }
+def _decision_map_from_keys(
+    decision_store: DecisionStore,
+    keys: List[Tuple[str, str]],
+) -> Dict[str, Dict[str, Any]]:
+    decisions = decision_store.get_decisions(keys)
+    out: Dict[str, Dict[str, Any]] = {}
+
+    for key in keys:
+        pair_key_str = f"{key[0]}__{key[1]}"
+        decision = decisions.get(key)
+        is_decided = decision_store.is_decided(key)
+
+        if decision is None:
+            out[pair_key_str] = {
+                "qa_status": "no",
+                "reason": "",
+                "date": "",
+                "is_decided": False,
+            }
+        else:
+            out[pair_key_str] = {
+                "qa_status": decision.qa_status,
+                "reason": decision.reason,
+                "date": decision.updated_at,
+                "is_decided": bool(is_decided),
+            }
+
+    return out
 
 
 def _build_workspace_bootstrap(
@@ -173,6 +225,25 @@ def _build_workspace_bootstrap(
         "initial_subject_id": subject_id,
         "review_mode": review_mode,
     }
+
+
+def _render_workspace(
+    app: Flask,
+    dataset: str,
+    initial_view: str,
+    subject_id: Optional[str],
+):
+    bootstrap = _build_workspace_bootstrap(
+        dataset=dataset,
+        initial_view=initial_view,
+        subject_id=subject_id,
+        review_mode=app.config["REVIEW_MODE"],
+    )
+    return render_template(
+        "workspace.html",
+        bootstrap=bootstrap,
+        datasets_index_url=url_for("datasets_page"),
+    )
 
 
 def create_app(
@@ -231,17 +302,11 @@ def create_app(
         if dataset not in index:
             abort(404)
 
-        bootstrap = _build_workspace_bootstrap(
+        return _render_workspace(
+            app=app,
             dataset=dataset,
             initial_view="subjects",
             subject_id=None,
-            review_mode=app.config["REVIEW_MODE"],
-        )
-
-        return render_template(
-            "workspace.html",
-            bootstrap=bootstrap,
-            datasets_index_url=url_for("datasets_page"),
         )
 
     @app.get("/review/<dataset>/<subject>")
@@ -252,17 +317,11 @@ def create_app(
         if dataset not in index or subject_id not in index[dataset]:
             abort(404)
 
-        bootstrap = _build_workspace_bootstrap(
+        return _render_workspace(
+            app=app,
             dataset=dataset,
             initial_view="review",
             subject_id=subject_id,
-            review_mode=app.config["REVIEW_MODE"],
-        )
-
-        return render_template(
-            "workspace.html",
-            bootstrap=bootstrap,
-            datasets_index_url=url_for("datasets_page"),
         )
 
     @app.get("/api/workspace_dataset")
@@ -273,11 +332,16 @@ def create_app(
         if dataset not in index:
             abort(404)
 
+        include_subject_data = _parse_boolish(
+            request.args.get("include_subject_data"),
+            default=True,
+        )
+
         payload = build_workspace_dataset_payload(
             index=index,
             dataset=dataset,
             decision_store=decision_store,
-            include_subject_data=True,
+            include_subject_data=include_subject_data,
         )
         payload["ok"] = True
         payload["review_mode"] = app.config["REVIEW_MODE"]
@@ -327,95 +391,22 @@ def create_app(
 
         return send_file(path, mimetype="image/png", conditional=True)
 
-    @app.post("/api/view")
-    def api_view():
+    @app.post("/api/flush_decisions")
+    def api_flush_decisions():
         payload = request.get_json(force=True, silent=False)
-        if not _pair_payload_ok(payload):
-            abort(400, "Bad payload")
+        rows = _extract_pair_rows_from_batch_payload(payload)
 
-        a, b = _extract_pair_fields(payload)
-
-        key = decision_store.ensure_default_no(
-            a_dataset=a["dataset"],
-            a_subject_id=a["subject_id"],
-            a_session_id=a["session_id"],
-            a_scan_uid=a["scan_uid"],
-            a_src_path=a["src_path"],
-            b_dataset=b["dataset"],
-            b_subject_id=b["subject_id"],
-            b_session_id=b["session_id"],
-            b_scan_uid=b["scan_uid"],
-            b_src_path=b["src_path"],
+        keys = decision_store.upsert_decisions_batch(rows)
+        decision_map = _decision_map_from_keys(
+            decision_store=decision_store,
+            keys=keys,
         )
-        decision = decision_store.get_decision(key)
 
         return jsonify(
             {
                 "ok": True,
-                "decision": _decision_to_json(decision),
-            }
-        )
-
-    @app.post("/api/decision")
-    def api_decision():
-        payload = request.get_json(force=True, silent=False)
-        if not _pair_payload_ok(payload):
-            abort(400, "Bad payload")
-
-        a, b = _extract_pair_fields(payload)
-
-        qa_status = _clean(payload.get("qa_status", "")).lower()
-        reason = _clean(payload.get("reason", ""))
-
-        key = decision_store.upsert_decision(
-            a_dataset=a["dataset"],
-            a_subject_id=a["subject_id"],
-            a_session_id=a["session_id"],
-            a_scan_uid=a["scan_uid"],
-            a_src_path=a["src_path"],
-            b_dataset=b["dataset"],
-            b_subject_id=b["subject_id"],
-            b_session_id=b["session_id"],
-            b_scan_uid=b["scan_uid"],
-            b_src_path=b["src_path"],
-            qa_status=qa_status,
-            reason=reason,
-        )
-        decision = decision_store.get_decision(key)
-
-        return jsonify(
-            {
-                "ok": True,
-                "decision": _decision_to_json(decision),
-            }
-        )
-
-    @app.post("/api/get_decision")
-    def api_get_decision():
-        payload = request.get_json(force=True, silent=False)
-        if not _pair_payload_ok(payload):
-            abort(400, "Bad payload")
-
-        a, b = _extract_pair_fields(payload)
-
-        key = decision_store.make_pair_key(
-            a_dataset=a["dataset"],
-            a_subject_id=a["subject_id"],
-            a_session_id=a["session_id"],
-            a_scan_uid=a["scan_uid"],
-            a_src_path=a["src_path"],
-            b_dataset=b["dataset"],
-            b_subject_id=b["subject_id"],
-            b_session_id=b["session_id"],
-            b_scan_uid=b["scan_uid"],
-            b_src_path=b["src_path"],
-        )
-        decision = decision_store.get_decision(key)
-
-        return jsonify(
-            {
-                "ok": True,
-                "decision": _decision_to_json(decision),
+                "decision_map": decision_map,
+                "num_updates": len(keys),
             }
         )
 

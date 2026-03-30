@@ -1,22 +1,34 @@
 {% extends "base.html" %} {% block title %}Workspace | {{ bootstrap.dataset }}{%
 endblock %} {% block content %}
 <div id="workspaceRoot">
-  <!-- Loading view -->
   <div id="loadingView" class="workspace-view">
-    <div id="loadingCard" class="card">
-      <div>
-        <div id="loadingStageText">Preparing workspace...</div>
-
-        <div id="loadingBarTrack">
-          <div id="loadingBarFill"></div>
+    <div
+      id="loadingCard"
+      class="card workspace-loader-card"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <div class="workspace-loader-body">
+        <div id="loadingStageText" class="workspace-loader-stage">
+          Preparing workspace...
         </div>
 
-        <div id="loadingProgressText">0 / 0</div>
+        <div
+          id="loadingBarTrack"
+          class="workspace-loader-track"
+          aria-hidden="true"
+        >
+          <div id="loadingBarFill" class="workspace-loader-fill"></div>
+        </div>
+
+        <div id="loadingProgressText" class="workspace-loader-progress">
+          0 / 0
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- Subjects view -->
   <div id="subjectsView" class="workspace-view is-hidden">
     <button
       id="btnBackToDatasets"
@@ -42,7 +54,6 @@ endblock %} {% block content %}
     </div>
   </div>
 
-  <!-- Review view -->
   <div id="reviewView" class="workspace-view is-hidden">
     <button
       id="btnBackToSubjects"
@@ -131,9 +142,9 @@ endblock %} {% block content %}
       <div class="panel-title">Human decision (default NO)</div>
 
       <div class="qa-buttons">
-        <button id="btnYes" class="btn btn-yes">YES</button>
-        <button id="btnNo" class="btn btn-no">NO</button>
-        <button id="btnMaybe" class="btn btn-maybe">MAYBE</button>
+        <button id="btnYes" class="btn btn-yes" type="button">YES</button>
+        <button id="btnNo" class="btn btn-no" type="button">NO</button>
+        <button id="btnMaybe" class="btn btn-maybe" type="button">MAYBE</button>
       </div>
 
       <div class="reason-block">
@@ -163,7 +174,6 @@ endblock %} {% block content %}
 <script id="datasets-index-url" type="application/json">
   {{ datasets_index_url | default("", true) | tojson }}
 </script>
-
 {% endblock %} {% block extra_scripts %}
 <script src="{{ url_for('static', filename='workspace.js') }}"></script>
 {% endblock %}
