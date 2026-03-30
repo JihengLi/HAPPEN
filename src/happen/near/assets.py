@@ -160,6 +160,28 @@ def _pair_checkerboard_path(
     ).resolve()
 
 
+def _needs_scan_asset(rec: Dict[str, str], overwrite: bool) -> bool:
+    if overwrite:
+        return True
+    png_path = Path(rec["png_path"]).expanduser().resolve()
+    return not png_path.exists()
+
+
+def _needs_pair_asset(rec: Dict[str, str], overwrite: bool) -> bool:
+    if overwrite:
+        return True
+    diff_path = Path(rec["diff_path"]).expanduser().resolve()
+    checkerboard_path = Path(rec["checkerboard_path"]).expanduser().resolve()
+    return not (diff_path.exists() and checkerboard_path.exists())
+
+
+def _needs_norm_cache(rec: Dict[str, str], overwrite: bool) -> bool:
+    if overwrite:
+        return True
+    norm_path = Path(rec["norm_path"]).expanduser().resolve()
+    return not norm_path.exists()
+
+
 def to_uint8(img: np.ndarray) -> np.ndarray:
     a = np.asarray(img)
 
@@ -763,6 +785,10 @@ def _scan_asset_worker(
     repro: bool,
     delete_extras: bool,
 ) -> int:
+    png_path = Path(rec["png_path"]).expanduser().resolve()
+    if png_path.exists() and not overwrite:
+        return 1
+
     norm_path = _build_review_norm_cache(
         resolved_path=Path(rec["resolved_path"]),
         atlas_image=Path(atlas_image),
@@ -777,7 +803,7 @@ def _scan_asset_worker(
 
     render_scan_png(
         norm_path=norm_path,
-        out_path=Path(rec["png_path"]),
+        out_path=png_path,
         overwrite=overwrite,
     )
     return 1
@@ -811,6 +837,12 @@ def _pair_asset_worker(
     overwrite: bool,
     diff_max: float,
 ) -> int:
+    diff_path = Path(rec["diff_path"]).expanduser().resolve()
+    checkerboard_path = Path(rec["checkerboard_path"]).expanduser().resolve()
+
+    if diff_path.exists() and checkerboard_path.exists() and not overwrite:
+        return 1
+
     norm_path_a = Path(rec["norm_path_a"]).expanduser().resolve()
     norm_path_b = Path(rec["norm_path_b"]).expanduser().resolve()
 
@@ -822,7 +854,7 @@ def _pair_asset_worker(
     render_pair_png(
         norm_path_a=norm_path_a,
         norm_path_b=norm_path_b,
-        out_path=Path(rec["diff_path"]),
+        out_path=diff_path,
         kind="diff",
         overwrite=overwrite,
         diff_max=diff_max,
@@ -830,7 +862,7 @@ def _pair_asset_worker(
     render_pair_png(
         norm_path_a=norm_path_a,
         norm_path_b=norm_path_b,
-        out_path=Path(rec["checkerboard_path"]),
+        out_path=checkerboard_path,
         kind="checkerboard",
         overwrite=overwrite,
         diff_max=diff_max,
@@ -853,7 +885,7 @@ def _precompute_pair_norm_caches(
     review_dir: Path,
     atlas_image: Path,
     meta_map: Dict[str, Dict[str, str]],
-    pair_requests: Dict[str, Dict[str, str]],
+    pending_pair_recs: List[Dict[str, str]],
     workers: int,
     overwrite: bool,
     winsor: Tuple[float, float],
@@ -862,8 +894,8 @@ def _precompute_pair_norm_caches(
     delete_extras: bool,
 ) -> int:
     needed_scan_uids = sorted(
-        {rec["scan_uid_a"] for rec in pair_requests.values()}
-        | {rec["scan_uid_b"] for rec in pair_requests.values()}
+        {rec["scan_uid_a"] for rec in pending_pair_recs}
+        | {rec["scan_uid_b"] for rec in pending_pair_recs}
     )
 
     recs: List[Dict[str, str]] = []
@@ -878,7 +910,16 @@ def _precompute_pair_norm_caches(
             }
         )
 
-    if not recs:
+    pending_recs = [rec for rec in recs if _needs_norm_cache(rec, overwrite)]
+
+    print("[REVIEW ASSETS] pair norm cache planning")
+    print(f"[REVIEW ASSETS] pair norm cache total scans: {len(recs)}")
+    print(f"[REVIEW ASSETS] pair norm cache pending scans: {len(pending_recs)}")
+    print(
+        f"[REVIEW ASSETS] pair norm cache skipped(existing): {len(recs) - len(pending_recs)}"
+    )
+
+    if not pending_recs:
         return 0
 
     with ProcessPoolExecutor(
@@ -896,7 +937,7 @@ def _precompute_pair_norm_caches(
                 bool(repro),
                 bool(delete_extras),
             )
-            for rec in recs
+            for rec in pending_recs
         ]
         return _run_parallel_futures(
             futures,
@@ -981,7 +1022,14 @@ def ensure_scan_assets(
     png_dir = review_dir / "assets" / "png"
     png_dir.mkdir(parents=True, exist_ok=True)
 
-    if recs:
+    pending_recs = [rec for rec in recs if _needs_scan_asset(rec, overwrite)]
+
+    print("[REVIEW ASSETS] scan planning")
+    print(f"[REVIEW ASSETS] scan total: {len(recs)}")
+    print(f"[REVIEW ASSETS] scan pending: {len(pending_recs)}")
+    print(f"[REVIEW ASSETS] scan skipped(existing): {len(recs) - len(pending_recs)}")
+
+    if pending_recs:
         with ProcessPoolExecutor(
             max_workers=int(workers),
             mp_context=get_context("spawn"),
@@ -997,7 +1045,7 @@ def ensure_scan_assets(
                     bool(repro),
                     bool(delete_extras),
                 )
-                for rec in recs
+                for rec in pending_recs
             ]
             ok_total = _run_parallel_futures(
                 futures,
@@ -1011,7 +1059,7 @@ def ensure_scan_assets(
     _write_empty_failure_csv(fail_csv, SCAN_FAIL_COLS)
 
     print("[REVIEW ASSETS] scan assets done")
-    print(f"[REVIEW ASSETS] scans ok: {ok_total}/{len(recs)}")
+    print(f"[REVIEW ASSETS] scans newly processed: {ok_total}/{len(pending_recs)}")
     print(f"[REVIEW ASSETS] scan failures: 0 -> {fail_csv}")
 
     return png_dir, fail_csv
@@ -1034,14 +1082,20 @@ def ensure_pair_assets(
     manifest_csv = Path(manifest_csv).expanduser().resolve()
     atlas_image = Path(atlas_image).expanduser().resolve()
 
+    a = str(scan_uid_a).strip()
+    b = str(scan_uid_b).strip()
+
+    diff_out = _pair_diff_path(review_dir, a, b)
+    cb_out = _pair_checkerboard_path(review_dir, a, b)
+
+    if diff_out.exists() and cb_out.exists() and not overwrite:
+        return diff_out, cb_out
+
     if not atlas_image.exists():
         raise FileNotFoundError(f"atlas image not found: {atlas_image}")
 
     manifest_df = _read_manifest(manifest_csv)
     meta_map = _manifest_meta_map(manifest_df)
-
-    a = str(scan_uid_a).strip()
-    b = str(scan_uid_b).strip()
 
     if a not in meta_map:
         raise ValueError(f"scan_uid not found in manifest: {a}")
@@ -1073,9 +1127,6 @@ def ensure_pair_assets(
         delete_extras=delete_extras,
         overwrite=overwrite,
     )
-
-    diff_out = _pair_diff_path(review_dir, a, b)
-    cb_out = _pair_checkerboard_path(review_dir, a, b)
 
     render_pair_png(
         norm_path_a=norm_a,
@@ -1135,19 +1186,6 @@ def precompute_pair_assets(
             f"{missing_uids[:10]}"
         )
 
-    norm_ok_total = _precompute_pair_norm_caches(
-        review_dir=review_dir,
-        atlas_image=atlas_image,
-        meta_map=meta_map,
-        pair_requests=pair_requests,
-        workers=workers,
-        overwrite=overwrite,
-        winsor=winsor,
-        hist_matching=hist_matching,
-        repro=repro,
-        delete_extras=delete_extras,
-    )
-
     recs: List[Dict[str, str]] = []
     for pkey, rec in sorted(pair_requests.items()):
         a = rec["scan_uid_a"]
@@ -1164,12 +1202,34 @@ def precompute_pair_assets(
             }
         )
 
+    pending_pair_recs = [rec for rec in recs if _needs_pair_asset(rec, overwrite)]
+
+    print("[REVIEW ASSETS] pair planning")
+    print(f"[REVIEW ASSETS] pair total: {len(recs)}")
+    print(f"[REVIEW ASSETS] pair pending: {len(pending_pair_recs)}")
+    print(
+        f"[REVIEW ASSETS] pair skipped(existing): {len(recs) - len(pending_pair_recs)}"
+    )
+
+    norm_ok_total = _precompute_pair_norm_caches(
+        review_dir=review_dir,
+        atlas_image=atlas_image,
+        meta_map=meta_map,
+        pending_pair_recs=pending_pair_recs,
+        workers=workers,
+        overwrite=overwrite,
+        winsor=winsor,
+        hist_matching=hist_matching,
+        repro=repro,
+        delete_extras=delete_extras,
+    )
+
     diff_dir = review_dir / "assets" / "diff"
     checkerboard_dir = review_dir / "assets" / "checkerboard"
     diff_dir.mkdir(parents=True, exist_ok=True)
     checkerboard_dir.mkdir(parents=True, exist_ok=True)
 
-    if recs:
+    if pending_pair_recs:
         with ProcessPoolExecutor(
             max_workers=int(workers),
             mp_context=get_context("spawn"),
@@ -1181,7 +1241,7 @@ def precompute_pair_assets(
                     bool(overwrite),
                     float(diff_max),
                 )
-                for rec in recs
+                for rec in pending_pair_recs
             ]
             ok_total = _run_parallel_futures(
                 futures,
@@ -1195,9 +1255,9 @@ def precompute_pair_assets(
     _write_empty_failure_csv(fail_csv, PAIR_FAIL_COLS)
 
     print("[REVIEW ASSETS] pair norm caches done")
-    print(f"[REVIEW ASSETS] pair norm caches ok: {norm_ok_total}")
+    print(f"[REVIEW ASSETS] pair norm caches newly processed: {norm_ok_total}")
     print("[REVIEW ASSETS] pair assets done")
-    print(f"[REVIEW ASSETS] pairs ok: {ok_total}/{len(recs)}")
+    print(f"[REVIEW ASSETS] pairs newly processed: {ok_total}/{len(pending_pair_recs)}")
     print(f"[REVIEW ASSETS] pair failures: 0 -> {fail_csv}")
 
     return diff_dir, checkerboard_dir

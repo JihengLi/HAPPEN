@@ -31,7 +31,7 @@ def build_sorted_file_index(
         .copy()
     )
     dup_count_per_ds = (
-        duplicates_df.groupby(["dataset", "can_hash"])["candidate"]
+        duplicates_df.groupby(["dataset", "group_id"])["candidate"]
         .nunique()
         .groupby("dataset")
         .sum()
@@ -229,7 +229,7 @@ def collect_duplicate_points_parallel(
             "across_subjects": {"x": [], "y": [], "custom": []},
             "across_datasets": {"x": [], "y": [], "custom": []},
         }
-        for can_hash, g in duplicates_df.groupby("can_hash", sort=False):
+        for group_id, g in duplicates_df.groupby("group_id", sort=False):
             pack = {
                 "file_idx": g["file_idx"].to_numpy(np.int64, copy=False),
                 "ds_code": g["ds_code"].to_numpy(np.int32, copy=False),
@@ -265,12 +265,12 @@ def collect_duplicate_points_parallel(
         return out
     group_list: List[Tuple[Any, int]] = []
     sizes: List[int] = []
-    for can_hash, g in duplicates_df.groupby("can_hash", sort=False):
+    for group_id, g in duplicates_df.groupby("group_id", sort=False):
         k = int(g.shape[0])
         pairs = k * (k - 1) // 2
         if pairs <= 0:
             continue
-        group_list.append((can_hash, k))
+        group_list.append((group_id, k))
         sizes.append(pairs)
 
     order = np.argsort(np.array(sizes))[::-1]
@@ -280,15 +280,15 @@ def collect_duplicate_points_parallel(
     duplicates_df = duplicates_df.reset_index(drop=True)
     group_indices: Dict[Any, np.ndarray] = {
         ch: idx.values
-        for ch, idx in duplicates_df.groupby("can_hash", sort=False).groups.items()
+        for ch, idx in duplicates_df.groupby("group_id", sort=False).groups.items()
     }
 
     for idx in order:
-        can_hash, k = group_list[idx]
+        group_id, k = group_list[idx]
         pairs = sizes[idx]
         b = int(np.argmin(bin_loads))
         bin_loads[b] += pairs
-        rows = group_indices[can_hash]
+        rows = group_indices[group_id]
         g = duplicates_df.loc[rows]
         bins[b].append(
             {

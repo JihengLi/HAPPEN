@@ -315,6 +315,114 @@ def _read_scan_candidates(
     return df
 
 
+def build_scan_groups(
+    scan_candidates_csv: Union[str, Path],
+    out_csv: Union[str, Path],
+    modality: str = "T1w",
+) -> Path:
+    scan_candidates_csv = Path(scan_candidates_csv)
+    out_csv = Path(out_csv)
+
+    df = _read_scan_candidates(scan_candidates_csv)
+
+    out_cols = [
+        "group_id",
+        "modality",
+        "dataset",
+        "subject_id",
+        "session_id",
+        "candidate",
+        "resolved_path",
+    ]
+
+    if df.empty:
+        out_df = pd.DataFrame(columns=out_cols)
+        atomic_write_csv(out_df, out_csv)
+        return out_csv
+
+    uf = UnionFind()
+
+    scan_meta: Dict[str, Tuple[str, str, str, str, str]] = {}
+    # scan_uid -> (dataset, subject_id, session_id, candidate, resolved_path)
+
+    for _, r in df.iterrows():
+        sua = str(r["scan_uid_a"]).strip()
+        sub = str(r["scan_uid_b"]).strip()
+
+        if not sua or not sub or sua == sub:
+            continue
+
+        uf.add(sua)
+        uf.add(sub)
+        uf.union(sua, sub)
+
+        if sua not in scan_meta:
+            scan_meta[sua] = (
+                str(r["dataset_a"]),
+                str(r["subject_id_a"]),
+                str(r["session_id_a"]),
+                str(r["candidate_a"]),
+                str(r["resolved_path_a"]),
+            )
+
+        if sub not in scan_meta:
+            scan_meta[sub] = (
+                str(r["dataset_b"]),
+                str(r["subject_id_b"]),
+                str(r["session_id_b"]),
+                str(r["candidate_b"]),
+                str(r["resolved_path_b"]),
+            )
+
+    if not scan_meta:
+        out_df = pd.DataFrame(columns=out_cols)
+        atomic_write_csv(out_df, out_csv)
+        return out_csv
+
+    comp_map: Dict[str, List[str]] = {}
+    for scan_uid in sorted(scan_meta.keys()):
+        root = uf.find(scan_uid)
+        comp_map.setdefault(root, []).append(scan_uid)
+
+    comps = [sorted(v) for v in comp_map.values() if len(v) > 1]
+    comps = sorted(comps, key=lambda xs: (len(xs), xs[0]))
+
+    rows: List[Dict[str, object]] = []
+    for i, comp in enumerate(comps, start=1):
+        group_id = f"group_{i:06d}"
+        for scan_uid in comp:
+            ds, sid, ses, cand, resolved = scan_meta[scan_uid]
+            rows.append(
+                {
+                    "group_id": group_id,
+                    "modality": modality,
+                    "dataset": ds,
+                    "subject_id": sid,
+                    "session_id": ses,
+                    "candidate": cand,
+                    "resolved_path": resolved,
+                }
+            )
+
+    out_df = pd.DataFrame(rows, columns=out_cols)
+
+    if not out_df.empty:
+        out_df = out_df.sort_values(
+            ["group_id", "dataset", "subject_id", "session_id", "candidate"],
+            kind="mergesort",
+        ).reset_index(drop=True)
+
+    atomic_write_csv(out_df, out_csv)
+
+    print(
+        f"[NEAR GROUP] scan groups: {out_df['group_id'].nunique() if not out_df.empty else 0:,}"
+    )
+    print(f"[NEAR GROUP] scan-group rows: {len(out_df):,}")
+    print(f"[NEAR GROUP] saved -> {out_csv}")
+
+    return out_csv
+
+
 def build_subject_edges(
     scan_candidates_csv: Union[str, Path],
     out_csv: Union[str, Path],
@@ -582,14 +690,22 @@ def build_subject_groups(
 def run_grouping(
     raw_neighbors_csv: Union[str, Path],
     out_scan_candidates_csv: Union[str, Path],
+    out_scan_groups_csv: Union[str, Path],
     out_subject_edges_csv: Union[str, Path],
     out_subject_groups_csv: Union[str, Path],
     min_similarity: float,
-) -> Tuple[Path, Path, Path]:
+    modality: str = "T1w",
+) -> Tuple[Path, Path, Path, Path]:
     scan_candidates_csv = build_scan_candidates(
         raw_neighbors_csv=raw_neighbors_csv,
         out_csv=out_scan_candidates_csv,
         min_similarity=min_similarity,
+    )
+
+    scan_groups_csv = build_scan_groups(
+        scan_candidates_csv=scan_candidates_csv,
+        out_csv=out_scan_groups_csv,
+        modality=modality,
     )
 
     subject_edges_csv = build_subject_edges(
@@ -602,4 +718,4 @@ def run_grouping(
         out_csv=out_subject_groups_csv,
     )
 
-    return scan_candidates_csv, subject_edges_csv, subject_groups_csv
+    return scan_candidates_csv, scan_groups_csv, subject_edges_csv, subject_groups_csv

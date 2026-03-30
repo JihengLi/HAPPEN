@@ -1,3 +1,6 @@
+# Author: Jiheng Li
+# Email: jiheng.li.1@vanderbilt.edu
+
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -10,9 +13,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG ANTS_VERSION=2.6.2
 
-# -----------------------------------------------------------------------------
-# System packages + Python 3.11 + uv
-# -----------------------------------------------------------------------------
+# System packages & Python 3.11 & uv
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
     ca-certificates \
@@ -39,10 +40,7 @@ RUN python3.11 -m pip install --upgrade pip setuptools wheel uv
 RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python \
     && ln -sf /usr/bin/python3.11 /usr/local/bin/python3
 
-# -----------------------------------------------------------------------------
-# Install ANTs 2.6.2 release binaries from GitHub at build time
-# After the image is built, runtime does not need internet.
-# -----------------------------------------------------------------------------
+# Install ANTs 2.6.2
 RUN python - <<'PY' > /tmp/ants_asset_url.txt
 import json
 import os
@@ -59,7 +57,6 @@ assets = data.get("assets", [])
 if not assets:
     raise SystemExit(f"No assets found for ANTs v{version}")
 
-# Prefer Ubuntu 22.04/Linux x64 binaries, then any Linux x64 binary.
 preferred = []
 fallback = []
 
@@ -85,7 +82,6 @@ if not candidates:
         f"Available assets:\n{names}"
     )
 
-# Pick the shortest preferred name as a simple tiebreaker.
 chosen = sorted(candidates, key=lambda x: (0 if "22.04" in x[0] else 1, len(x[0]), x[0]))[0]
 print(chosen[1])
 PY
@@ -103,9 +99,7 @@ RUN mkdir -p /opt/ants_download /opt/ants \
 ENV PATH="/opt/ants/bin:${PATH}" \
     LD_LIBRARY_PATH="/opt/ants/lib:${LD_LIBRARY_PATH:-}"
 
-# -----------------------------------------------------------------------------
 # App install
-# -----------------------------------------------------------------------------
 WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
@@ -117,20 +111,15 @@ RUN chmod +x /usr/local/bin/happen-entrypoint
 
 ENV PATH="/app/.venv/bin:/opt/ants/bin:${PATH}"
 
-# Honor your current pyproject/uv.lock exactly.
 RUN uv sync --frozen
 
-# -----------------------------------------------------------------------------
-# Smoke tests at build time
-# -----------------------------------------------------------------------------
+# Smoke tests
 RUN python -c "import happen; print('happen import OK')"
 RUN python -c "from deepbet import run_bet; print('deepbet import OK')"
 RUN antsRegistration --version
 RUN N4BiasFieldCorrection --version
 
-# -----------------------------------------------------------------------------
 # Runtime defaults
-# -----------------------------------------------------------------------------
 WORKDIR /workspace
 EXPOSE 5291
 

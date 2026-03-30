@@ -10,6 +10,7 @@ import tomllib
 import argparse
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -148,7 +149,8 @@ def run_pipeline(
     stages = _resolve_stages(run_cfg)
 
     profile_runtime = bool(run_cfg.get("profile_runtime", False))
-    perf_dir = out_dir / "_perf"
+    run_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+    perf_dir = out_dir / "_perf" / run_ts
 
     out_dir.mkdir(parents=True, exist_ok=True)
     _copy_config_snapshot(config_path, out_dir)
@@ -161,6 +163,7 @@ def run_pipeline(
         config_path=str(config_path),
         out_dir=str(out_dir),
         requested_stages=",".join(stages),
+        run_timestamp=run_ts,
     )
 
     exact_artifacts: Optional[ExactStageArtifacts] = None

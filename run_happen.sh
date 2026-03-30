@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Author: Jiheng Li
+# Email: jiheng.li.1@vanderbilt.edu
+
 set -euo pipefail
 
 IMAGE="${HAPPEN_IMAGE:-happen:gpu}"

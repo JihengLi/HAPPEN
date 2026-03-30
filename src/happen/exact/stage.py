@@ -18,12 +18,7 @@ from .hashing import (
     group_and_organize_duplicates,
 )
 from .verify import verify_all_categories
-from ..report import (
-    report_by_dataset,
-    report_by_category,
-    report_by_category_across_datasets,
-    visualize_file_matrix,
-)
+from ..report import run_categorize_reports, visualize_file_matrix
 from ..utils.runtime_profile import RuntimeProfiler
 
 
@@ -331,25 +326,12 @@ def run_exact_stage(
             modality,
             process_workers,
         )
-
-        report_by_dataset(
-            duplicates_csv,
-            by_dataset_dir,
-            modality,
-        )
-
-        report_by_category(
-            by_dataset_dir,
-            by_category_dir,
-            by_category_stats_dir,
-            modality,
-        )
-
-        report_by_category_across_datasets(
-            duplicates_csv,
-            by_category_dir,
-            by_category_stats_dir,
-            modality,
+        run_categorize_reports(
+            in_csv=duplicates_csv,
+            by_dataset_dir=by_dataset_dir,
+            by_category_dir=by_category_dir,
+            by_category_stats_dir=by_category_stats_dir,
+            modality="T1w",
         )
 
         if verify:
