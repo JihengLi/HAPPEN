@@ -99,7 +99,11 @@ subject_id }}{% endblock %} {% block content %}
 </script>
 
 <script id="review-ctx" type="application/json">
-  {{ {"dataset": dataset, "subject_id": subject_id} | tojson }}
+  {{ {
+    "dataset": dataset,
+    "subject_id": subject_id,
+    "review_mode": review_mode
+  } | tojson }}
 </script>
 
 <script id="subject-nav" type="application/json">

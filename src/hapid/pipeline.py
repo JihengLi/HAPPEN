@@ -5,9 +5,9 @@ Email: jiheng.li.1@vanderbilt.edu
 
 from __future__ import annotations
 
-import logging
 import shutil
 import tomllib
+import argparse
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -295,15 +295,17 @@ def run_pipeline(
                 print(f"[PIPELINE][WARN] Failed to save runtime profiling outputs: {e}")
 
 
-def run_pipeline_main(config_path: Union[str, Path]) -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Run pipeline.")
+    ap.add_argument(
+        "config",
+        type=Path,
+        help="Path to pipeline config TOML file",
     )
+    args = ap.parse_args()
 
-    try:
-        run_pipeline(config_path)
-        return 0
-    except Exception:
-        logging.exception("[PIPELINE] Unhandled exception.")
-        return 1
+    run_pipeline(args.config)
+
+
+if __name__ == "__main__":
+    main()

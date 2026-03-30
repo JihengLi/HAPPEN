@@ -1,3 +1,8 @@
+"""
+Author: Jiheng Li
+Email: jiheng.li.1@vanderbilt.edu
+"""
+
 from __future__ import annotations
 
 import csv

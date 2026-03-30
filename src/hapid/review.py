@@ -1,20 +1,28 @@
+"""
+Author: Jiheng Li
+Email: jiheng.li.1@vanderbilt.edu
+"""
+
 from __future__ import annotations
 
 import logging
 import tomllib
+import argparse
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Union
 
-from . import loader
-from .app import create_app
-from .store import DecisionStore
+from .review_app_new import loader
+from .review_app_new.app import create_app
+from .review_app_new.store import DecisionStore
 
 
 @dataclass
 class ReviewConfig:
     config_path: Path
+    out_dir: Path
+    review_mode: str
     png_root: Path
     candidates_csv: Path
     decisions_csv: Path
@@ -47,23 +55,28 @@ def _require_table(cfg: Dict[str, Any], name: str) -> Dict[str, Any]:
     return table
 
 
-def _require_path_str(d: Dict[str, Any], key: str, table_name: str) -> Path:
-    if key not in d:
-        raise ValueError(f"[{table_name}].{key} is required")
-    v = str(d[key]).strip()
-    if not v:
-        raise ValueError(f"[{table_name}].{key} is required")
-    return Path(v).expanduser().resolve()
-
-
 def _build_review_config(config_path: Union[str, Path]) -> ReviewConfig:
     config_path = Path(config_path).expanduser().resolve()
     cfg = _read_toml(config_path)
+
+    run_cfg = _require_table(cfg, "run")
+    near_cfg = _require_table(cfg, "near")
     review_cfg = _require_table(cfg, "review")
 
-    png_root = _require_path_str(review_cfg, "png_root", "review")
-    candidates_csv = _require_path_str(review_cfg, "candidates_csv", "review")
-    decisions_csv = _require_path_str(review_cfg, "decisions_csv", "review")
+    out = run_cfg.get("out", None)
+    if out is None or not str(out).strip():
+        raise ValueError("[run].out is required")
+
+    out_dir = Path(str(out)).expanduser().resolve()
+
+    review_mode = str(near_cfg.get("review_mode", "off")).strip().lower()
+    if review_mode not in {"off", "lazy", "precompute"}:
+        raise ValueError("[near].review_mode must be one of: off, lazy, precompute")
+
+    review_root = out_dir / "near" / "review"
+    png_root = review_root / "assets" / "png"
+    candidates_csv = review_root / "review_candidates.csv"
+    decisions_csv = review_root / "review_decisions.csv"
 
     autosave_every = max(1, int(review_cfg.get("autosave_every", 1)))
     host = str(review_cfg.get("host", "127.0.0.1")).strip() or "127.0.0.1"
@@ -72,6 +85,8 @@ def _build_review_config(config_path: Union[str, Path]) -> ReviewConfig:
 
     return ReviewConfig(
         config_path=config_path,
+        out_dir=out_dir,
+        review_mode=review_mode,
         png_root=png_root,
         candidates_csv=candidates_csv,
         decisions_csv=decisions_csv,
@@ -83,6 +98,12 @@ def _build_review_config(config_path: Union[str, Path]) -> ReviewConfig:
 
 
 def run_review_app(cfg: ReviewConfig) -> int:
+    if cfg.review_mode == "off":
+        logging.error(
+            "[REVIEW] review_mode=off. Review assets were not enabled in the pipeline config."
+        )
+        return 2
+
     if not cfg.png_root.exists():
         logging.error("[REVIEW] png_root does not exist: %s", cfg.png_root)
         return 2
@@ -97,6 +118,7 @@ def run_review_app(cfg: ReviewConfig) -> int:
     cfg.decisions_csv.parent.mkdir(parents=True, exist_ok=True)
 
     logging.info("[REVIEW] config -> %s", cfg.config_path)
+    logging.info("[REVIEW] review_mode -> %s", cfg.review_mode)
     logging.info("[REVIEW] png_root -> %s", cfg.png_root)
     logging.info("[REVIEW] candidates_csv -> %s", cfg.candidates_csv)
     logging.info("[REVIEW] decisions_csv -> %s", cfg.decisions_csv)
@@ -138,6 +160,7 @@ def run_review_app(cfg: ReviewConfig) -> int:
         index=index,
         png_root=cfg.png_root,
         decision_store=store,
+        review_mode=cfg.review_mode,
     )
 
     logging.info("[REVIEW] Starting server: http://%s:%d", cfg.host, cfg.port)
@@ -159,9 +182,17 @@ def run_review_app(cfg: ReviewConfig) -> int:
     return 0
 
 
-def run_review_main(config_path: Union[str, Path]) -> int:
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Run review app.")
+    ap.add_argument(
+        "config",
+        type=Path,
+        help="Path to review config TOML file",
+    )
+    args = ap.parse_args()
+
     try:
-        cfg = _build_review_config(config_path)
+        cfg = _build_review_config(args.config)
     except Exception as e:
         print(f"[REVIEW][ERROR] {e}")
         return 2
@@ -176,3 +207,7 @@ def run_review_main(config_path: Union[str, Path]) -> int:
     except Exception:
         logging.exception("[REVIEW] Unhandled exception.")
         return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

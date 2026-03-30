@@ -182,8 +182,14 @@
   }
 
   const SUBJECT_DATA = readInjectedJSON("subject-data");
+  const REVIEW_CTX = readInjectedJSON("review-ctx");
   const SUBJECT_NAV = readInjectedJSON("subject-nav");
   const PAIR_ASSET_URL = readInjectedJSON("pair-asset-url");
+
+  const REVIEW_MODE = safeStr(REVIEW_CTX.review_mode).trim().toLowerCase();
+  if (!["lazy", "precompute"].includes(REVIEW_MODE)) {
+    throw new Error(`Invalid review_mode: ${REVIEW_MODE}`);
+  }
 
   if (!Array.isArray(SUBJECT_DATA) || SUBJECT_DATA.length === 0) {
     throw new Error("subject-data is empty or not an array");
@@ -346,7 +352,7 @@
   }
 
   const DIFF_MAX = 64;
-  const CHECK_TILE = 16;
+  const CHECK_TILE = 32;
 
   function showMissing(canvasEl, missingEl, msg) {
     canvasEl.style.display = "none";
@@ -500,41 +506,60 @@
       return;
     }
 
-    const diffUrl = buildPairAssetUrl("diff", q.scan_uid, c.scan_uid);
-    const checkUrl = buildPairAssetUrl("checkerboard", q.scan_uid, c.scan_uid);
-
-    const [diffRes, checkRes] = await Promise.all([
-      loadImageUrl(diffUrl),
-      loadImageUrl(checkUrl),
-    ]);
-
-    if (version !== renderVersion) return;
-
-    if (diffRes.status === "loaded" && checkRes.status === "loaded") {
-      drawLoadedImageToCanvas(diffRes.img, diffCanvas, diffCtx, diffMissing);
-      drawLoadedImageToCanvas(
-        checkRes.img,
-        checkCanvas,
-        checkCtx,
-        checkMissing,
+    if (REVIEW_MODE === "precompute") {
+      const diffUrl = buildPairAssetUrl("diff", q.scan_uid, c.scan_uid);
+      const checkUrl = buildPairAssetUrl(
+        "checkerboard",
+        q.scan_uid,
+        c.scan_uid,
       );
+
+      const [diffRes, checkRes] = await Promise.all([
+        loadImageUrl(diffUrl),
+        loadImageUrl(checkUrl),
+      ]);
+
+      if (version !== renderVersion) return;
+
+      if (diffRes.status === "loaded") {
+        drawLoadedImageToCanvas(diffRes.img, diffCanvas, diffCtx, diffMissing);
+      } else {
+        showMissing(diffCanvas, diffMissing, "(Diff unavailable)");
+      }
+
+      if (checkRes.status === "loaded") {
+        drawLoadedImageToCanvas(
+          checkRes.img,
+          checkCanvas,
+          checkCtx,
+          checkMissing,
+        );
+      } else {
+        showMissing(checkCanvas, checkMissing, "(Checkerboard unavailable)");
+      }
+
       return;
     }
 
-    const [qStatus, cStatus] = await Promise.all([
-      waitForImage(queryImg),
-      waitForImage(candImg),
-    ]);
+    if (REVIEW_MODE === "lazy") {
+      const [qStatus, cStatus] = await Promise.all([
+        waitForImage(queryImg),
+        waitForImage(candImg),
+      ]);
 
-    if (version !== renderVersion) return;
+      if (version !== renderVersion) return;
 
-    if (qStatus === "loaded" && cStatus === "loaded") {
-      const ok = computeAndRenderDiffAndCheckerLocal();
-      if (ok) return;
+      if (qStatus === "loaded" && cStatus === "loaded") {
+        const ok = computeAndRenderDiffAndCheckerLocal();
+        if (ok) return;
+      }
+
+      showMissing(diffCanvas, diffMissing, "(Diff unavailable)");
+      showMissing(checkCanvas, checkMissing, "(Checkerboard unavailable)");
+      return;
     }
 
-    showMissing(diffCanvas, diffMissing, "(Diff unavailable)");
-    showMissing(checkCanvas, checkMissing, "(Checkerboard unavailable)");
+    throw new Error(`Unhandled review_mode: ${REVIEW_MODE}`);
   }
 
   async function renderAll() {

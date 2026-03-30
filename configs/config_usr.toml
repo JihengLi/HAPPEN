@@ -33,3 +33,9 @@ review_mode = "lazy"   # off | lazy | precompute
 review_workers = 32
 overwrite_review_assets = false
 max_scan_candidates_per_query = 100
+
+[review]
+autosave_every = 1
+host = "127.0.0.1"
+port = 5291
+debug = false

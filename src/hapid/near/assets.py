@@ -341,7 +341,7 @@ def _difference_tile(
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def _checkerboard_tile(a: np.ndarray, b: np.ndarray, tile: int = 16) -> np.ndarray:
+def _checkerboard_tile(a: np.ndarray, b: np.ndarray, tile: int = 32) -> np.ndarray:
     aa = to_uint8(a)
     bb = to_uint8(b)
 
@@ -1220,7 +1220,7 @@ def build_review_assets(
     review_dir = Path(review_dir).expanduser().resolve()
 
     atlas_image = (
-        Path(__file__).resolve().parents[2]
+        Path(__file__).resolve().parents[3]
         / "resources"
         / "mni_1mm3_t1_brain_atlas.nii.gz"
     )
