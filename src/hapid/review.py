@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Union
 
-from .review_app_new import loader
-from .review_app_new.app import create_app
-from .review_app_new.store import DecisionStore
+from .review_app import loader
+from .review_app.app import create_app
+from .review_app.store import DecisionStore
 
 
 @dataclass
