@@ -1,0 +1,137 @@
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_LINK_MODE=copy
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG ANTS_VERSION=2.6.2
+
+# -----------------------------------------------------------------------------
+# System packages + Python 3.11 + uv
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    ca-certificates \
+    curl \
+    git \
+    build-essential \
+    tini \
+    unzip \
+    libglib2.0-0 \
+    libgomp1 \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
+    && python3.11 /tmp/get-pip.py \
+    && rm -f /tmp/get-pip.py
+
+RUN python3.11 -m pip install --upgrade pip setuptools wheel uv
+
+RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python3
+
+# -----------------------------------------------------------------------------
+# Install ANTs 2.6.2 release binaries from GitHub at build time
+# After the image is built, runtime does not need internet.
+# -----------------------------------------------------------------------------
+RUN python - <<'PY' > /tmp/ants_asset_url.txt
+import json
+import os
+import sys
+import urllib.request
+
+version = os.environ["ANTS_VERSION"]
+api_url = f"https://api.github.com/repos/ANTsX/ANTs/releases/tags/v{version}"
+
+with urllib.request.urlopen(api_url) as resp:
+    data = json.load(resp)
+
+assets = data.get("assets", [])
+if not assets:
+    raise SystemExit(f"No assets found for ANTs v{version}")
+
+# Prefer Ubuntu 22.04/Linux x64 binaries, then any Linux x64 binary.
+preferred = []
+fallback = []
+
+for asset in assets:
+    name = asset["name"].lower()
+    url = asset["browser_download_url"]
+
+    is_archive = name.endswith(".zip") or name.endswith(".tar.gz") or name.endswith(".tgz")
+    is_linux = ("ubuntu" in name or "linux" in name)
+    is_x64 = ("x64" in name or "amd64" in name or "x86_64" in name)
+
+    if is_archive and is_linux and is_x64:
+        if "22.04" in name or "ubuntu-22.04" in name or "ubuntu22.04" in name:
+            preferred.append((name, url))
+        else:
+            fallback.append((name, url))
+
+candidates = preferred or fallback
+if not candidates:
+    names = "\n".join(a["name"] for a in assets)
+    raise SystemExit(
+        "Could not find a suitable ANTs Linux x64 archive asset. "
+        f"Available assets:\n{names}"
+    )
+
+# Pick the shortest preferred name as a simple tiebreaker.
+chosen = sorted(candidates, key=lambda x: (0 if "22.04" in x[0] else 1, len(x[0]), x[0]))[0]
+print(chosen[1])
+PY
+
+RUN mkdir -p /opt/ants_download /opt/ants \
+    && ANTS_URL="$(cat /tmp/ants_asset_url.txt)" \
+    && echo "Downloading ANTs from: ${ANTS_URL}" \
+    && curl -L "${ANTS_URL}" -o /tmp/ants_archive \
+    && (unzip -q /tmp/ants_archive -d /opt/ants_download || tar -xf /tmp/ants_archive -C /opt/ants_download) \
+    && FIRST_DIR="$(find /opt/ants_download -mindepth 1 -maxdepth 1 -type d | head -n 1)" \
+    && test -n "${FIRST_DIR}" \
+    && cp -a "${FIRST_DIR}/." /opt/ants/ \
+    && rm -rf /opt/ants_download /tmp/ants_archive /tmp/ants_asset_url.txt
+
+ENV PATH="/opt/ants/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/ants/lib:${LD_LIBRARY_PATH:-}"
+
+# -----------------------------------------------------------------------------
+# App install
+# -----------------------------------------------------------------------------
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+COPY resources ./resources
+COPY docker/entrypoint.sh /usr/local/bin/happen-entrypoint
+
+RUN chmod +x /usr/local/bin/happen-entrypoint
+
+ENV PATH="/app/.venv/bin:/opt/ants/bin:${PATH}"
+
+# Honor your current pyproject/uv.lock exactly.
+RUN uv sync --frozen
+
+# -----------------------------------------------------------------------------
+# Smoke tests at build time
+# -----------------------------------------------------------------------------
+RUN python -c "import happen; print('happen import OK')"
+RUN python -c "from deepbet import run_bet; print('deepbet import OK')"
+RUN antsRegistration --version
+RUN N4BiasFieldCorrection --version
+
+# -----------------------------------------------------------------------------
+# Runtime defaults
+# -----------------------------------------------------------------------------
+WORKDIR /workspace
+EXPOSE 5291
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/happen-entrypoint"]
