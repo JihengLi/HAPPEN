@@ -7,18 +7,22 @@ profile_runtime = true
 root = ""
 candidates_csv = ""
 valid_csv = ""
+thread_workers = 32
+process_workers = 16
+
 modality = "T1w"
-thread_workers = 64
-process_workers = 32
 
 [near]
-preprocess_workers = 32
-batch_size = 32
+preprocess_workers = 16
 device = "auto"
+min_similarity = 0.92
+review_mode = "lazy" # off | lazy | precompute
+review_workers = 16
+
+batch_size = 16
 use_amp = true
 overwrite_embeddings = false
 fail_fast = false
-
 topk = 500
 retrieval_batch_size = 2048
 use_ivf = true
@@ -27,15 +31,12 @@ nprobe = 64
 train_size = 200000
 seed = 0
 overwrite_retrieval = false
-min_similarity = 0.92
-
-review_mode = "lazy"   # off | lazy | precompute
-review_workers = 32
 overwrite_review_assets = false
 max_scan_candidates_per_query = 100
 
 [review]
+port = 8000
+
 autosave_every = 1
 host = "0.0.0.0"
-port = 8000
 debug = false
