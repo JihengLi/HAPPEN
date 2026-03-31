@@ -122,6 +122,6 @@ RUN N4BiasFieldCorrection --version
 
 # Runtime defaults
 WORKDIR /workspace
-EXPOSE 5291
+EXPOSE 8000
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/happen-entrypoint"]
