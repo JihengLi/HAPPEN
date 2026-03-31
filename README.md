@@ -41,10 +41,10 @@ sudo docker pull <container_image>
 ### Container images and package locations
 
 - Current container image:
-  `ghcr.io/jihengli/happen-upenn-pilot:v0.1.0-cu128`
+  `ghcr.io/jihengli/happen:v0.1.0-cu128`
 
 - GitHub Package page:
-  `https://github.com/users/JihengLi/packages/container/package/happen-upenn-pilot`
+  `https://github.com/users/JihengLi/packages/container/package/happen`
 
 ## Usage overview
 
