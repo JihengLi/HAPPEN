@@ -149,7 +149,11 @@ add_mount() {
   DOCKER_ARGS+=(-v "$item")
 }
 
-DOCKER_ARGS=(docker run --rm --gpus all)
+if [[ "$MODE" == "pipeline" ]]; then
+  DOCKER_ARGS=(docker run --rm --gpus all)
+else
+  DOCKER_ARGS=(docker run --rm)
+fi
 
 if ! is_same_or_within "$CONFIG_DIR" "$RUN_OUT"; then
   add_mount "$CONFIG_DIR" ro
