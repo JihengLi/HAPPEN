@@ -39,4 +39,5 @@ port = 8000
 
 autosave_every = 1
 host = "0.0.0.0"
+preview_max_width = 1200
 debug = false

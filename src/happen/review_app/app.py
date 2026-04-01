@@ -248,7 +248,7 @@ def _render_workspace(
 
 def _send_resize_png(
     path: Path,
-    max_width: int = 1200,
+    max_width: int,
 ):
     with Image.open(path) as img:
         img = img.convert("RGBA")
@@ -269,11 +269,12 @@ def create_app(
     png_root: Path,
     decision_store: DecisionStore,
     review_mode: str,
+    preview_max_width: int,
 ) -> Flask:
     review_mode = _clean(review_mode).lower()
     if review_mode not in {"lazy", "precompute"}:
         raise ValueError(f"invalid review_mode: {review_mode}")
-
+        
     app = Flask(__name__)
 
     png_root = Path(png_root).resolve()
@@ -282,6 +283,7 @@ def create_app(
     app.config["PNG_ROOT"] = str(png_root)
     app.config["ASSETS_ROOT"] = str(assets_root)
     app.config["REVIEW_MODE"] = review_mode
+    app.config["PREVIEW_MAX_WIDTH"] = int(preview_max_width)
 
     @app.get("/")
     def datasets_page():
@@ -385,7 +387,7 @@ def create_app(
         if not path.exists():
             abort(404)
 
-        return _send_resize_png(path)
+        return _send_resize_png(path, max_width=app.config["PREVIEW_MAX_WIDTH"])
 
     @app.get("/pair_asset")
     def pair_asset():
@@ -407,7 +409,7 @@ def create_app(
         if not path.exists():
             abort(404)
 
-        return _send_resize_png(path)
+        return _send_resize_png(path, max_width=app.config["PREVIEW_MAX_WIDTH"])
 
     @app.post("/api/flush_decisions")
     def api_flush_decisions():

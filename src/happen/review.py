@@ -29,6 +29,7 @@ class ReviewConfig:
     autosave_every: int
     host: str
     port: int
+    preview_max_width: int
     debug: bool
 
 
@@ -79,8 +80,9 @@ def _build_review_config(config_path: Union[str, Path]) -> ReviewConfig:
     decisions_csv = review_root / "review_decisions.csv"
 
     autosave_every = max(1, int(review_cfg.get("autosave_every", 1)))
-    host = str(review_cfg.get("host", "127.0.0.1")).strip() or "127.0.0.1"
-    port = int(review_cfg.get("port", 5291))
+    host = str(review_cfg.get("host", "0.0.0.0")).strip() or "0.0.0.0"
+    port = int(review_cfg.get("port", 8000))
+    preview_max_width = int(review_cfg.get("preview_max_width", 1200))
     debug = bool(review_cfg.get("debug", False))
 
     return ReviewConfig(
@@ -93,6 +95,7 @@ def _build_review_config(config_path: Union[str, Path]) -> ReviewConfig:
         autosave_every=autosave_every,
         host=host,
         port=port,
+        preview_max_width=preview_max_width,
         debug=debug,
     )
 
@@ -161,6 +164,7 @@ def run_review_app(cfg: ReviewConfig) -> int:
         png_root=cfg.png_root,
         decision_store=store,
         review_mode=cfg.review_mode,
+        preview_max_width=cfg.preview_max_width,
     )
 
     logging.info("[REVIEW] Starting server: http://%s:%d", cfg.host, cfg.port)
@@ -168,7 +172,7 @@ def run_review_app(cfg: ReviewConfig) -> int:
         app.run(
             host=cfg.host,
             port=cfg.port,
-            debug=False,
+            debug=cfg.debug,
             use_reloader=False,
             threaded=True,
         )

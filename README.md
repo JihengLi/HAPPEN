@@ -149,6 +149,7 @@ A minimal example is shown below:
 
   autosave_every = 1
   host = "0.0.0.0"
+  preview_max_width = 1200
   debug = false
 ```
 
@@ -218,11 +219,11 @@ The remaining parameters are usually safe to leave at their default values unles
 
 #### `[near]`
 
-- `batch_size`: batch size used during near-stage processing.
+- `batch_size`: number of embeddings buffered before each save during near-stage processing.
 - `use_amp`: if `true`, use automatic mixed precision when supported.
 - `fail_fast`: if `true`, stop immediately when an error occurs.
-- `topk`: number of nearest neighbors retrieved per query before thresholding.
-- `retrieval_batch_size`: batch size used during retrieval.
+- `topk`: number of nearest neighbors retrieved per query using FAISS before thresholding.
+- `retrieval_batch_size`: batch size used during FAISS retrieval.
 - `use_ivf`: whether to use IVF-based approximate nearest-neighbor retrieval.
 - `nlist`: number of IVF coarse clusters.
 - `nprobe`: number of IVF clusters probed during search.
@@ -237,6 +238,7 @@ The remaining parameters are usually safe to leave at their default values unles
 
 - `autosave_every`: save review decisions after this many updates.
 - `host`: host address used by the review server.
+- `preview_max_width`: downsamples preview images to reduce browser memory usage.
 - `debug`: enables debug mode if set to `true`.
 
 ## Outputs

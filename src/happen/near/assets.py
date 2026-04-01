@@ -36,6 +36,7 @@ from .preprocessing import (
 DEFAULT_FRACS: List[float] = [0.30, 0.40, 0.45, 0.50, 0.55, 0.60, 0.70]
 DEFAULT_PERC: Tuple[float, float] = (1.0, 99.0)
 DEFAULT_DIFF_MAX: float = 64.0
+DEFAULT_CHECK_TILE: int = 16
 
 SCAN_FAIL_COLS = ["scan_uid", "resolved_path", "png_path", "error"]
 PAIR_FAIL_COLS = ["pair_key", "scan_uid_a", "scan_uid_b", "error"]
@@ -363,7 +364,7 @@ def _difference_tile(
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def _checkerboard_tile(a: np.ndarray, b: np.ndarray, tile: int = 32) -> np.ndarray:
+def _checkerboard_tile(a: np.ndarray, b: np.ndarray, tile: int = DEFAULT_CHECK_TILE) -> np.ndarray:
     aa = to_uint8(a)
     bb = to_uint8(b)
 
