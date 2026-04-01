@@ -61,7 +61,6 @@ def _decision_to_json(
     key: Tuple[str, str],
 ) -> DecisionJSON:
     decision = decision_store.get_decision(key)
-    is_decided = decision_store.is_decided(key)
 
     if decision is None:
         return {
@@ -75,7 +74,7 @@ def _decision_to_json(
         "qa_status": decision.qa_status,
         "reason": decision.reason,
         "date": decision.updated_at,
-        "is_decided": bool(is_decided),
+        "is_decided": True,
     }
 
 
@@ -164,44 +163,6 @@ def _build_workspace_subject_payload_from_records(
         "subject_data": subject_data,
         "decision_map": decision_map,
     }
-
-
-def build_subject_data(
-    query_records: List[loader.QueryRecord],
-) -> List[Dict[str, Any]]:
-    subject_data: List[Dict[str, Any]] = []
-
-    for qr in query_records:
-        query = qr.query
-        candidates: List[Dict[str, Any]] = []
-
-        for cand in qr.candidates:
-            scan = cand.scanref
-            candidates.append(
-                {
-                    "dataset": scan.dataset,
-                    "subject_id": scan.subject_id,
-                    "session_id": scan.session_id,
-                    "scan_uid": scan.scan_uid,
-                    "src_path": scan.src_path,
-                    "similarity": cand.similarity,
-                }
-            )
-
-        subject_data.append(
-            {
-                "query": {
-                    "dataset": query.dataset,
-                    "subject_id": query.subject_id,
-                    "session_id": query.session_id,
-                    "scan_uid": query.scan_uid,
-                    "src_path": query.src_path,
-                },
-                "candidates": candidates,
-            }
-        )
-
-    return subject_data
 
 
 def build_subject_pair_progress(

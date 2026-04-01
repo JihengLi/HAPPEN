@@ -193,7 +193,6 @@ class DecisionStore:
     @classmethod
     def _build_key_and_meta(
         cls,
-        *,
         a_dataset: str,
         a_subject_id: str,
         a_session_id: str,
@@ -242,7 +241,6 @@ class DecisionStore:
 
     def _set_decision_locked(
         self,
-        *,
         key: Tuple[str, str],
         meta: Tuple[str, str, str, str, str, str, str, str],
         qa_status: str,
@@ -256,10 +254,6 @@ class DecisionStore:
         )
         self._meta[key] = meta
         self._writes_since_export += 1
-
-    def is_decided(self, key: Tuple[str, str]) -> bool:
-        with self._lock:
-            return key in self._cache
 
     def has_key(self, key: Tuple[str, str]) -> bool:
         with self._lock:

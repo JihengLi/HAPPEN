@@ -183,7 +183,6 @@ def _decision_map_from_keys(
     for key in keys:
         pair_key_str = f"{key[0]}__{key[1]}"
         decision = decisions.get(key)
-        is_decided = decision_store.is_decided(key)
 
         if decision is None:
             out[pair_key_str] = {
@@ -197,7 +196,7 @@ def _decision_map_from_keys(
                 "qa_status": decision.qa_status,
                 "reason": decision.reason,
                 "date": decision.updated_at,
-                "is_decided": bool(is_decided),
+                "is_decided": True,
             }
 
     return out

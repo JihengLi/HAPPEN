@@ -132,15 +132,6 @@
     );
   }
 
-  function decisionToPlain(entry) {
-    if (!entry) return null;
-    return {
-      qa_status: entry.qa_status,
-      reason: entry.reason,
-      date: entry.serverDate || "",
-    };
-  }
-
   const BOOTSTRAP = readInjectedJSON("workspace-bootstrap");
   const WORKSPACE_API_URL = readInjectedJSON("workspace-api-url");
   const PAIR_ASSET_URL = readInjectedJSON("pair-asset-url");
@@ -281,11 +272,10 @@
     return "no";
   }
 
-  function applyDecisionToUI(decisionOrNull) {
-    if (decisionOrNull && decisionOrNull.qa_status) {
-      setSelected(decisionOrNull.qa_status);
-      reasonBox.value =
-        typeof decisionOrNull.reason === "string" ? decisionOrNull.reason : "";
+  function applyDecisionToUI(entry) {
+    if (entry && entry.qa_status) {
+      setSelected(entry.qa_status);
+      reasonBox.value = typeof entry.reason === "string" ? entry.reason : "";
     } else {
       setSelected("no");
       reasonBox.value = "";
@@ -344,26 +334,30 @@
     };
   }
 
+  function makeDecisionEntry(key, q, c, seeded) {
+    return {
+      key,
+      a: q,
+      b: c,
+      qa_status: seeded
+        ? safeStr(seeded.qa_status).toLowerCase() || "no"
+        : "no",
+      reason: seeded && typeof seeded.reason === "string" ? seeded.reason : "",
+      serverDate: seeded ? safeStr(seeded.date) : "",
+      isDecided: !!(seeded && seeded.is_decided),
+      dirty: false,
+      inflightSave: false,
+      localRevision: 0,
+    };
+  }
+
   function getOrCreateDecisionEntry(q, c) {
     const key = getPairKey(c);
     let entry = state.decisionCache.get(key);
 
     if (!entry) {
       const seeded = state.datasetDecisionMap[key] || null;
-      entry = {
-        key,
-        a: q,
-        b: c,
-        qa_status: seeded
-          ? safeStr(seeded.qa_status).toLowerCase() || "no"
-          : "no",
-        reason:
-          seeded && typeof seeded.reason === "string" ? seeded.reason : "",
-        serverDate: seeded ? safeStr(seeded.date) : "",
-        dirty: false,
-        inflightSave: false,
-        localRevision: 0,
-      };
+      entry = makeDecisionEntry(key, q, c, seeded);
       state.decisionCache.set(key, entry);
     } else {
       entry.a = q;
@@ -387,18 +381,7 @@
         for (const c of cands) {
           const key = getPairKey(c);
           const dj = state.datasetDecisionMap[key] || null;
-
-          state.decisionCache.set(key, {
-            key,
-            a: q,
-            b: c,
-            qa_status: dj ? safeStr(dj.qa_status).toLowerCase() || "no" : "no",
-            reason: dj && typeof dj.reason === "string" ? dj.reason : "",
-            serverDate: dj ? safeStr(dj.date) : "",
-            dirty: false,
-            inflightSave: false,
-            localRevision: 0,
-          });
+          state.decisionCache.set(key, makeDecisionEntry(key, q, c, dj));
         }
       }
     }
@@ -409,7 +392,7 @@
     const c = currentCandidate();
     if (!c) return null;
     const entry = getOrCreateDecisionEntry(q, c);
-    return { q, c, key: entry.key, entry };
+    return { q, c, entry };
   }
 
   function captureCurrentPairFromUI() {
@@ -503,6 +486,9 @@
                 entry.reason =
                   typeof dj.reason === "string" ? dj.reason : entry.reason;
                 entry.serverDate = safeStr(dj.date);
+                entry.isDecided = !!dj.is_decided;
+              } else {
+                entry.isDecided = true;
               }
             }
           }
@@ -1192,7 +1178,15 @@
     setImgOrMissing(candImg, candMissing, buildPngUrl(c));
 
     const entry = getOrCreateDecisionEntry(q, c);
-    applyDecisionToUI(decisionToPlain(entry));
+    applyDecisionToUI(entry);
+
+    if (!entry.isDecided && !entry.dirty) {
+      entry.qa_status = "no";
+      entry.reason = "";
+      entry.dirty = true;
+      entry.localRevision += 1;
+      scheduleFlushDirtyPairs();
+    }
 
     showPanelLoading(diffCanvas, diffMissing, "(Loading...)");
     showPanelLoading(checkCanvas, checkMissing, "(Loading...)");

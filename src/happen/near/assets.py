@@ -364,7 +364,9 @@ def _difference_tile(
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def _checkerboard_tile(a: np.ndarray, b: np.ndarray, tile: int = DEFAULT_CHECK_TILE) -> np.ndarray:
+def _checkerboard_tile(
+    a: np.ndarray, b: np.ndarray, tile: int = DEFAULT_CHECK_TILE
+) -> np.ndarray:
     aa = to_uint8(a)
     bb = to_uint8(b)
 
