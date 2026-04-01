@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
+from io import BytesIO
+from PIL import Image
 from flask import (
     Flask,
     abort,
@@ -245,6 +246,23 @@ def _render_workspace(
         datasets_index_url=url_for("datasets_page"),
     )
 
+def _send_resize_png(
+    path: Path,
+    max_width: int = 1200,
+):
+    with Image.open(path) as img:
+        img = img.convert("RGBA")
+
+        w, h = img.size
+        if w > max_width:
+            new_h = int(h * (max_width / w))
+            img = img.resize((max_width, new_h), Image.Resampling.LANCZOS)
+
+        buf = BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        buf.seek(0)
+
+    return send_file(buf, mimetype="image/png", conditional=False)
 
 def create_app(
     index: IndexType,
@@ -367,7 +385,7 @@ def create_app(
         if not path.exists():
             abort(404)
 
-        return send_file(path, mimetype="image/png", conditional=True)
+        return _send_resize_png(path)
 
     @app.get("/pair_asset")
     def pair_asset():
@@ -389,7 +407,7 @@ def create_app(
         if not path.exists():
             abort(404)
 
-        return send_file(path, mimetype="image/png", conditional=True)
+        return _send_resize_png(path)
 
     @app.post("/api/flush_decisions")
     def api_flush_decisions():

@@ -199,7 +199,7 @@
   if (overlay) overlay.classList.add("is-hidden");
 
   const DIFF_MAX = 64;
-  const CHECK_TILE = 32;
+  const CHECK_TILE = 16;
   const FLUSH_DEBOUNCE_MS = 300;
 
   const state = {
@@ -1302,6 +1302,67 @@
     }
   }
 
+  function clearWorkspaceCaches() {
+    state.renderVersion += 1;
+
+    if (state.flushTimer !== null) {
+      clearTimeout(state.flushTimer);
+      state.flushTimer = null;
+    }
+
+    if (queryImg) {
+      queryImg.onload = null;
+      queryImg.onerror = null;
+      queryImg.src = "";
+      delete queryImg.dataset.currentUrl;
+    }
+    if (candImg) {
+      candImg.onload = null;
+      candImg.onerror = null;
+      candImg.src = "";
+      delete candImg.dataset.currentUrl;
+    }
+
+    if (diffCanvas) {
+      diffCtx.clearRect(0, 0, diffCanvas.width, diffCanvas.height);
+      diffCanvas.width = 1;
+      diffCanvas.height = 1;
+    }
+    if (checkCanvas) {
+      checkCtx.clearRect(0, 0, checkCanvas.width, checkCanvas.height);
+      checkCanvas.width = 1;
+      checkCanvas.height = 1;
+    }
+
+    for (const asset of state.lazyPairAssetCache.values()) {
+      if (!asset || asset.status !== "loaded") continue;
+
+      if (asset.diffSource && typeof asset.diffSource.close === "function") {
+        try {
+          asset.diffSource.close();
+        } catch (e) {}
+      }
+
+      if (asset.checkSource && typeof asset.checkSource.close === "function") {
+        try {
+          asset.checkSource.close();
+        } catch (e) {}
+      }
+    }
+
+    state.imageLoadCache.clear();
+    state.lazyPairAssetCache.clear();
+    state.decisionCache.clear();
+
+    state.reviewBySubject = {};
+    state.datasetDecisionMap = {};
+    state.subjects = [];
+
+    state.currentSubjectId = "";
+    state.queryIdx = 0;
+    state.candIdx = 0;
+  }
+
   async function backToSubjects() {
     captureCurrentPairFromUI();
     await flushAllDirtyPairs();
@@ -1312,6 +1373,7 @@
   function backToDatasets() {
     captureCurrentPairFromUI();
     void flushAllDirtyPairs().finally(() => {
+      clearWorkspaceCaches();
       window.location.assign(DATASETS_INDEX_URL);
     });
   }
