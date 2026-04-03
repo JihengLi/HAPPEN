@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-IMAGE="${HAPPEN_IMAGE:-happen:gpu}"
+IMAGE="${HAPPEN_IMAGE:-happen:latest}"
 
 normalize_abs_path() {
   local p="$1"

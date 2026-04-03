@@ -40,15 +40,20 @@ sudo docker pull <container_image>
 
 ### Container images and package locations
 
-- Current container image:
+- Recommended fixed version tag:
   `ghcr.io/jihengli/happen:v0.1.0-cu128`
+
+- Convenience tag:
+  `ghcr.io/jihengli/happen:latest`
 
 - GitHub Package page:
   `https://github.com/users/JihengLi/packages/container/package/happen`
 
 ## Usage overview
 
-HAPPEN is launched through `./run_happen.sh`.
+HAPPEN is launched through `./run_happen.sh`. The script is designed to launch the container, set up the required bind mounts, and pass the selected mode and configuration file into the container.
+
+Before running HAPPEN, clone this repository and run `./run_happen.sh` from the repository root. Do **not** try to run `run_happen.sh` inside the container.
 
 General command pattern:
 

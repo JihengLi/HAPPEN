@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     libglib2.0-0 \
     libgomp1 \
+    fd-find \
     && add-apt-repository ppa:deadsnakes/ppa -y \
     && apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
