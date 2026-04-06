@@ -20,7 +20,7 @@ HAPPEN is distributed as a docker image through GitHub Container Registry (GHCR)
 
 Before pulling the image, make sure that you have created a **GitHub Personal Access Token (classic)** with at least the `read:packages` scope.
 
-Then log in to GHCR and pull the image:
+Then log in to GHCR and pull the image using one of the following:
 
 ```bash
 export CR_PAT="<GITHUB_CLASSIC_PAT>"
@@ -51,25 +51,27 @@ sudo docker pull <container_image>
 
 ## Usage overview
 
-HAPPEN is launched through `./run_happen.sh`. The script is designed to launch the container, set up the required bind mounts, and pass the selected mode and configuration file into the container.
-
-Before running HAPPEN, clone this repository and run `./run_happen.sh` from the repository root. Do **not** try to run `run_happen.sh` inside the container.
+> [!IMPORTANT]
+> First, ensure you have cloned this repository. 
+> HAPPEN is launched by executing the `run_happen.sh` script in the top level of this repository. This is the primary run-script for the project. It handles launching the container, setting up the required bind
+> mounts, and passing the selected mode and configuration file into the container. Do **not** try to run `run_happen.sh` inside the container.
 
 General command pattern:
 
 ```bash
-sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh <mode> <config.toml> [--bind <host_path> ...]
+sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh <mode> <config> [--bind <host_path> ...]
 ```
 
-Where:
-
-- `<mode>` selects the execution mode:
-  - `pipeline`: run the main auditing pipeline
-  - `review`: launch the review interface for inspecting candidate pairs
-- `<config.toml>` is the user configuration file
-- `--bind <host_path>` mounts an additional host directory into the container and can be provided multiple times
+|argument|description|
+| --- | --- |
+|container_image|`ghcr.io/jihengli/happen:latest`|
+|mode|`pipeline` or `review` depending on task|
+|config|user config file (TOML)|
+|host_path|additional location to mount on container|
 
 ## Quick start
+
+From the root of this repository:
 
 1. Copy the user configuration template:
 
@@ -79,7 +81,7 @@ cp configs/config_usr.toml my_config.toml
 
 2. Edit `my_config.toml` and fill in the required paths.
 
-3. Run the full pipeline:
+3. Run the full pipeline (mode set to `pipeline`):
 
 ```bash
 sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml
@@ -88,8 +90,7 @@ sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml
 If your input data or output locations require additional host mounts, add one or more `--bind` arguments:
 
 ```bash
-sudo HAPPEN_IMAGE=<container_image> \
-./run_happen.sh pipeline my_config.toml \
+sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml \
   --bind /path/to/host1 \
   --bind /path/to/host2
 ```
@@ -97,8 +98,7 @@ sudo HAPPEN_IMAGE=<container_image> \
 4. After the pipeline has finished, launch the review interface with:
 
 ```bash
-sudo HAPPEN_IMAGE=<container_image> \
-./run_happen.sh review my_config.toml
+sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh review my_config.toml
 ```
 
 ## Input and configuration
@@ -178,11 +178,12 @@ The exact stage supports three input fields:
 - `candidates_csv`
 - `valid_csv`
 
-> **Important: only one of the three may be used.**
+> [!IMPORTANT]
+> Set only **one** of the following stage input properties.
 
 - `[exact].root`: root directory of a BIDS-style filesystem. When `root` is provided, HAPPEN automatically searches the repository and discovers all eligible T1-weighted scans.
 - `[exact].candidates_csv`: path to a candidate CSV with the columns `dataset,subject_id,session_id,candidate`. Here, `candidate` is the input file path provided to the pipeline. HAPPEN performs an initial validation step and resolves each candidate to a usable `resolved_path`.
-- `[exact].valid_csv`: path to a validated CSV with the columns `dataset,subject_id,session_id,candidate,resolved_path`. This option is intended for cases where validation and path resolution have already been completed in advance.
+- `[exact].valid_csv`: path to a validated CSV with the columns `dataset,subject_id,session_id,candidate,resolved_path`. This option is intended for cases where validation and path resolution have already been completed.
 
 The exact stage also has two important runtime parameters:
 
@@ -253,7 +254,14 @@ All outputs are written under `[run].out`. The two main output folders are:
 - `exact/`
 - `near/`
 
-### `exact/`
+#### Most important outputs
+
+- `exact/duplicates.csv`: Exact deduplication result.
+- `exact/figures/files_matrix_T1w.html`: Clear visualization for the exact duplicates.
+- `near/scan_candidates.csv`: Near deduplication result.
+- `near/review/review_decisions.csv` (after review): Human-in-the-loop auditing result.
+### Complete list of outputs
+#### `exact/`
 
 - `candidates.csv`: candidate scans that searched from `[exact].root` or from input.
 - `valid.csv`: all validated T1w MRI scans that passed input checking or from input.
@@ -278,7 +286,7 @@ All outputs are written under `[run].out`. The two main output folders are:
 
 - `figures/files_matrix_T1w.html`: recommended summary view; an interactive lower-triangular matrix showing exact duplicates between dataset pairs. Open in a browser.
 
-### `near/`
+#### `near/`
 
 - `no_exact_dup.csv`: near-stage input after removing exact duplicates.
 - `exact_removed.csv`: scans removed from the near stage because they were already identified as exact duplicates.
@@ -303,13 +311,6 @@ All outputs are written under `[run].out`. The two main output folders are:
   - `assets/png/`: PNG renderings of scans involved in review.
   - `assets/diff/`: difference images for near-duplicate scan pairs.
   - `assets/checkerboard/`: checkerboard comparison images for near-duplicate scan pairs.
-
-### Most important outputs
-
-- `exact/duplicates.csv`: Exact deduplication result.
-- `exact/figures/files_matrix_T1w.html`: Clear visualization for the exact duplicates.
-- `near/scan_candidates.csv`: Near deduplication result.
-- `near/review/review_decisions.csv` (after review): Human-in-the-loop auditing result.
 
 ## Review interface
 
