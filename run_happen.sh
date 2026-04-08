@@ -102,7 +102,10 @@ EOF
 
 declare -a EXTRA_BINDS
 declare -a DOCKER_ARGS
-declare -a MOUNTS
+declare -a MOUNT_PATHS
+
+declare -A MOUNT_MODE
+declare -A MOUNT_REASON
 
 if [[ $# -lt 2 ]]; then
   usage
@@ -161,22 +164,65 @@ while IFS='=' read -r key value; do
   esac
 done < <(parse_config "$CONFIG_INPUT" "$CONFIG_DIR")
 
+if [[ -z "${RUN_OUT:-}" ]]; then
+  echo "[run_happen][ERROR] [run].out could not be resolved from config"
+  exit 2
+fi
+
 if [[ "$MODE" == "pipeline" ]]; then
   mkdir -p "$RUN_OUT"
 fi
 
-add_mount() {
+request_mount() {
   local src="$1"
   local mode="$2"
-  [[ -n "$src" ]] || return 0
+  local reason="$3"
 
-  local item="${src}:${src}:${mode}"
-  for x in "${MOUNTS[@]:-}"; do
-    [[ "$x" == "$item" ]] && return 0
+  [[ -n "$src" ]] || return 0
+  src="$(normalize_abs_path "$src")"
+
+  if is_same_or_within "$src" "$RUN_OUT"; then
+    mode="rw"
+  fi
+
+  if [[ -v MOUNT_MODE["$src"] ]]; then
+    if [[ "${MOUNT_MODE[$src]}" == "ro" && "$mode" == "rw" ]]; then
+      MOUNT_MODE["$src"]="rw"
+      MOUNT_REASON["$src"]="${MOUNT_REASON[$src]}; upgraded to rw by ${reason}"
+    else
+      MOUNT_REASON["$src"]="${MOUNT_REASON[$src]}; ${reason}"
+    fi
+    return 0
+  fi
+
+  MOUNT_PATHS+=("$src")
+  MOUNT_MODE["$src"]="$mode"
+  MOUNT_REASON["$src"]="$reason"
+}
+
+build_mounts() {
+  if ! is_same_or_within "$CONFIG_DIR" "$RUN_OUT"; then
+    request_mount "$CONFIG_DIR" "ro" "config_dir"
+  fi
+
+  if [[ "$MODE" == "pipeline" ]]; then
+    [[ -z "${EXACT_ROOT:-}" ]] || request_mount "$EXACT_ROOT" "ro" "exact.root"
+    [[ -z "${EXACT_CANDIDATES_CSV:-}" ]] || request_mount "$EXACT_CANDIDATES_CSV" "ro" "exact.candidates_csv"
+    [[ -z "${EXACT_VALID_CSV:-}" ]] || request_mount "$EXACT_VALID_CSV" "ro" "exact.valid_csv"
+  fi
+
+  for b in "${EXTRA_BINDS[@]:-}"; do
+    request_mount "$b" "ro" "extra_bind"
   done
 
-  MOUNTS+=("$item")
-  DOCKER_ARGS+=(-v "$item")
+  request_mount "$RUN_OUT" "rw" "run.out"
+}
+
+emit_mount_args() {
+  local p
+  for p in "${MOUNT_PATHS[@]}"; do
+    DOCKER_ARGS+=(-v "${p}:${p}:${MOUNT_MODE[$p]}")
+  done
 }
 
 if [[ "$MODE" == "pipeline" ]]; then
@@ -185,21 +231,8 @@ else
   DOCKER_ARGS=(docker run --rm)
 fi
 
-if ! is_same_or_within "$CONFIG_DIR" "$RUN_OUT"; then
-  add_mount "$CONFIG_DIR" ro
-fi
-
-add_mount "$RUN_OUT" rw
-
-if [[ "$MODE" == "pipeline" ]]; then
-  [[ -z "${EXACT_ROOT:-}" ]] || add_mount "$EXACT_ROOT" ro
-  [[ -z "${EXACT_CANDIDATES_CSV:-}" ]] || add_mount "$EXACT_CANDIDATES_CSV" ro
-  [[ -z "${EXACT_VALID_CSV:-}" ]] || add_mount "$EXACT_VALID_CSV" ro
-fi
-
-for b in "${EXTRA_BINDS[@]:-}"; do
-  add_mount "$b" ro
-done
+build_mounts
+emit_mount_args
 
 DOCKER_ARGS+=(-w "$CONFIG_DIR")
 
@@ -224,8 +257,8 @@ else
   fi
 fi
 
-for b in "${EXTRA_BINDS[@]:-}"; do
-  echo "[run_happen] extra bind  -> $b"
+for p in "${MOUNT_PATHS[@]}"; do
+  echo "[run_happen] mount -> ${p} (${MOUNT_MODE[$p]})"
 done
 
 DOCKER_ARGS+=("$IMAGE" "$MODE" "$CONFIG_INPUT")
