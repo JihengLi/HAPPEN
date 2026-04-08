@@ -13,10 +13,10 @@ from typing import Optional, Tuple, Union
 from .assets import build_review_assets
 from .embedding import run_embedding_inference
 from .format import build_review_table
-from .grouping import run_grouping
+from .grouping import build_scan_candidates, build_subject_edges, build_subject_groups
 from .preparation import prepare_no_exact_dup
 from .retrieval import run_faiss_retrieval
-from ..report import run_categorize_reports, visualize_file_matrix
+from .report import run_categorize_reports, visualize_file_matrix
 from ..utils.runtime_profile import RuntimeProfiler
 
 
@@ -98,14 +98,8 @@ def run_near_stage(
 
     raw_neighbors_csv = near_dir / "raw_neighbors.csv"
     scan_candidates_csv = near_dir / "scan_candidates.csv"
-    scan_groups_csv = near_dir / "scan_groups.csv"
     subject_edges_csv = near_dir / "subject_edges.csv"
     subject_groups_csv = near_dir / "subject_groups.csv"
-
-    by_dataset_dir = near_dir / "by_dataset"
-    by_category_dir = near_dir / "by_category"
-    by_category_stats_dir = near_dir / "by_category_stats"
-    figures_dir = near_dir / "figures"
 
     review_candidates_csv: Optional[Path] = None
     png_dir: Optional[Path] = None
@@ -130,7 +124,7 @@ def run_near_stage(
     )
 
     with remove_exact_ctx:
-        print("[NEAR] Step 1/7: prepare near input")
+        print("[NEAR] Step 1/6: prepare near input")
         prepare_no_exact_dup(
             valid_csv=valid_csv,
             exact_duplicates_csv=exact_duplicates_csv,
@@ -164,7 +158,7 @@ def run_near_stage(
     )
 
     with embedding_ctx:
-        print("[NEAR] Step 2/7: embedding inference")
+        print("[NEAR] Step 2/6: embedding inference")
         run_embedding_inference(
             in_csv=no_exact_dup_csv,
             out_dir=near_dir,
@@ -205,7 +199,7 @@ def run_near_stage(
     )
 
     with faiss_group_ctx:
-        print("[NEAR] Step 3/7: FAISS retrieval")
+        print("[NEAR] Step 3/6: FAISS retrieval")
         run_faiss_retrieval(
             manifest_csv=embedding_manifest_csv,
             embeddings_npy=embeddings_npy,
@@ -220,29 +214,11 @@ def run_near_stage(
             overwrite=overwrite_retrieval,
         )
 
-        print("[NEAR] Step 4/7: grouping")
-        run_grouping(
+        print("[NEAR] Step 4/6: grouping")
+        build_scan_candidates(
             raw_neighbors_csv=raw_neighbors_csv,
-            out_scan_candidates_csv=scan_candidates_csv,
-            out_scan_groups_csv=scan_groups_csv,
-            out_subject_edges_csv=subject_edges_csv,
-            out_subject_groups_csv=subject_groups_csv,
+            out_csv=scan_candidates_csv,
             min_similarity=min_similarity,
-        )
-
-        print("[NEAR] Step 5/7: reporting")
-        visualize_file_matrix(
-            scan_groups_csv,
-            figures_dir,
-            "T1w",
-            preprocess_workers,
-        )
-        run_categorize_reports(
-            in_csv=scan_groups_csv,
-            by_dataset_dir=by_dataset_dir,
-            by_category_dir=by_category_dir,
-            by_category_stats_dir=by_category_stats_dir,
-            modality="T1w",
         )
 
     if review_mode != "off":
@@ -250,14 +226,14 @@ def run_near_stage(
 
         review_candidates_csv = review_dir / "review_candidates.csv"
 
-        print("[NEAR] Step 6/7: build review table")
+        print("[NEAR] Step 5/6: build review table")
         build_review_table(
             review_dir=review_dir,
             scan_candidates_csv=scan_candidates_csv,
             max_candidates_per_query=max_scan_candidates_per_query,
         )
 
-        print(f"[NEAR] Step 7/7: build review assets (mode={review_mode})")
+        print(f"[NEAR] Step 6/6: build review assets (mode={review_mode})")
         build_review_assets(
             review_dir=review_dir,
             manifest_csv=embedding_manifest_csv,
@@ -299,3 +275,52 @@ def run_near_stage(
         scan_asset_failures_csv=scan_asset_failures_csv,
         pair_asset_failures_csv=pair_asset_failures_csv,
     )
+
+
+def finalize_near_stage_from_review(
+    out_dir: Union[str, Path],
+    modality: str = "T1w",
+) -> Optional[Path]:
+    out_dir = Path(out_dir).expanduser().resolve()
+
+    near_dir = out_dir / "near"
+    review_dir = near_dir / "review"
+    review_decisions_csv = review_dir / "review_decisions.csv"
+
+    subject_edges_csv = near_dir / "subject_edges.csv"
+    subject_groups_csv = near_dir / "subject_groups.csv"
+
+    by_dataset_dir = near_dir / "by_dataset"
+    by_category_dir = near_dir / "by_category"
+    by_category_stats_dir = near_dir / "by_category_stats"
+    figures_dir = near_dir / "figures"
+
+    print("[NEAR] Post review: build subject edges")
+    build_subject_edges(
+        review_decisions_csv=review_decisions_csv,
+        out_csv=subject_edges_csv,
+    )
+
+    print("[NEAR] Post review: build subject groups")
+    build_subject_groups(
+        subject_edges_csv=subject_edges_csv,
+        out_csv=subject_groups_csv,
+    )
+
+    print("[NEAR] Post review: build reports")
+    run_categorize_reports(
+        in_csv=subject_groups_csv,
+        by_dataset_dir=by_dataset_dir,
+        by_category_dir=by_category_dir,
+        by_category_stats_dir=by_category_stats_dir,
+    )
+
+    print("[NEAR] Post review: build matrix")
+    visualize_file_matrix(
+        duplicates_csv=subject_groups_csv,
+        out_dir=figures_dir,
+        modality=modality,
+    )
+
+    print(f"[NEAR] Post review done -> {near_dir}")
+    return review_decisions_csv

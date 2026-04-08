@@ -52,22 +52,22 @@ sudo docker pull <container_image>
 ## Usage overview
 
 > [!IMPORTANT]
-> First, ensure you have cloned this repository. 
+> First, ensure you have cloned this repository.
 > HAPPEN is launched by executing the `run_happen.sh` script in the top level of this repository. This is the primary run-script for the project. It handles launching the container, setting up the required bind
 > mounts, and passing the selected mode and configuration file into the container. Do **not** try to run `run_happen.sh` inside the container.
 
 General command pattern:
 
 ```bash
-sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh <mode> <config> [--bind <host_path> ...]
+sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh <mode> <config> [finalize] [--bind <host_path> ...]
 ```
 
-|argument|description|
-| --- | --- |
-|container_image|`ghcr.io/jihengli/happen:latest`|
-|mode|`pipeline` or `review` depending on task|
-|config|user config file (TOML)|
-|host_path|additional location to mount on container|
+| argument        | description                               |
+| --------------- | ----------------------------------------- |
+| container_image | `ghcr.io/jihengli/happen:latest`          |
+| mode            | `pipeline` or `review` depending on task  |
+| config          | user config file (TOML)                   |
+| host_path       | additional location to mount on container |
 
 ## Quick start
 
@@ -101,6 +101,12 @@ sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml \
 sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh review my_config.toml
 ```
 
+5. After the human review is complete, generate the finalized confirmed reports:
+
+```bash
+sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh review my_config.toml finalize
+```
+
 ## Input and configuration
 
 HAPPEN is configured through a user-provided TOML file, which is organized into four sections:
@@ -116,7 +122,9 @@ A minimal example is shown below:
   [run]
   out = ""
   stages = ["exact", "near"]
+
   profile_runtime = true
+  modality = "T1w"
 
   [exact]
   root = ""
@@ -124,8 +132,6 @@ A minimal example is shown below:
   valid_csv = ""
   thread_workers = 32
   process_workers = 16
-
-  modality = "T1w"
 
   [near]
   preprocess_workers = 16
@@ -218,9 +224,6 @@ The remaining parameters are usually safe to leave at their default values unles
 #### `[run]`
 
 - `profile_runtime`: if `true`, HAPPEN records runtime profiling information.
-
-#### `[exact]`
-
 - `modality`: MRI modality to process. Default is `"T1w"`.
 
 #### `[near]`
@@ -257,10 +260,14 @@ All outputs are written under `[run].out`. The two main output folders are:
 #### Most important outputs
 
 - `exact/duplicates.csv`: Exact deduplication result.
-- `exact/figures/files_matrix_T1w.html`: Clear visualization for the exact duplicates.
+- `exact/figures/files_matrix_T1w.html`: Clear visualization of the exact duplicates.
 - `near/scan_candidates.csv`: Near deduplication result.
 - `near/review/review_decisions.csv` (after review): Human-in-the-loop auditing result.
+- `near/subject_groups.csv` (after finalize): Confirmed near-duplicate subject groups.
+- `near/figures/files_matrix_T1w.html` (after finalize): Clear visualization of the confirmed near duplicates.
+
 ### Complete list of outputs
+
 #### `exact/`
 
 - `candidates.csv`: candidate scans that searched from `[exact].root` or from input.
@@ -298,11 +305,6 @@ All outputs are written under `[run].out`. The two main output folders are:
 - `subject_edges.csv`: subject-level links derived from scan-level candidates.
 - `subject_groups.csv`: subject-level connected groups derived from the candidate graph.
 
-- `by_category/`: near-duplicate candidates reorganized by category.
-- `by_category_stats/`: summary statistics for the near-duplicate categories.
-- `by_dataset/`: near-duplicate candidates reorganized by dataset.
-- `figures/`: near-stage summary figures based on unreviewed candidates; useful for rough inspection only.
-
 - `review/`: outputs used by the review tool.
   - `review_candidates.csv`: candidate pairs presented to the review interface.
   - `review_decisions.csv`: saved human review decisions.
@@ -311,6 +313,16 @@ All outputs are written under `[run].out`. The two main output folders are:
   - `assets/png/`: PNG renderings of scans involved in review.
   - `assets/diff/`: difference images for near-duplicate scan pairs.
   - `assets/checkerboard/`: checkerboard comparison images for near-duplicate scan pairs.
+
+- `by_category/`: finalized near-duplicate outputs reorganized by duplicate type after human review.
+  - `within_datasets.csv`: confirmed near duplicates involving different recorded subjects within the same dataset.
+  - `across_datasets.csv`: confirmed near duplicates spanning different datasets.
+
+- `by_category_stats/`: summary statistics for the two finalized near-duplicate categories above.
+
+- `by_dataset/`: finalized near-duplicate outputs reorganized by dataset. Each file contains all confirmed near-duplicate subjects that form duplicate groups within that dataset scope.
+
+- `figures/`: subject-level summary figures generated from the finalized confirmed near-duplicate subject groups.
 
 ## Review interface
 

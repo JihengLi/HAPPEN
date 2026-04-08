@@ -147,6 +147,7 @@ def run_pipeline(
 
     out_dir = Path(str(out)).expanduser().resolve()
     stages = _resolve_stages(run_cfg)
+    modality = str(run_cfg.get("modality", "T1w"))
 
     profile_runtime = bool(run_cfg.get("profile_runtime", False))
     run_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
@@ -162,6 +163,7 @@ def run_pipeline(
     profiler.set_run_meta(
         config_path=str(config_path),
         out_dir=str(out_dir),
+        modality=modality,
         requested_stages=",".join(stages),
         run_timestamp=run_ts,
     )
@@ -184,7 +186,6 @@ def run_pipeline(
                         if valid_csv
                         else "candidates_csv" if candidates_csv else "root"
                     ),
-                    exact_modality=str(exact_cfg.get("modality", "T1w")),
                     exact_thread_workers=int(exact_cfg.get("thread_workers", 4)),
                     exact_process_workers=int(exact_cfg.get("process_workers", 4)),
                     exact_verify=bool(exact_cfg.get("verify", False)),
@@ -195,7 +196,7 @@ def run_pipeline(
                     root=root,
                     candidates_csv=candidates_csv,
                     valid_csv=valid_csv,
-                    modality=str(exact_cfg.get("modality", "T1w")),
+                    modality=modality,
                     out=str(out_dir),
                     thread_workers=int(exact_cfg.get("thread_workers", 4)),
                     process_workers=int(exact_cfg.get("process_workers", 4)),
@@ -219,7 +220,7 @@ def run_pipeline(
                     near_nlist=int(near_cfg.get("nlist", 4096)),
                     near_nprobe=int(near_cfg.get("nprobe", 64)),
                     near_train_size=int(near_cfg.get("train_size", 200000)),
-                    near_min_similarity=float(near_cfg.get("min_similarity", 0.8)),
+                    near_min_similarity=float(near_cfg.get("min_similarity", 0.92)),
                     near_review_mode=str(near_cfg.get("review_mode", "off")),
                     near_review_workers=int(near_cfg.get("review_workers", 24)),
                 )
@@ -264,7 +265,7 @@ def run_pipeline(
                         near_cfg.get("overwrite_retrieval", False)
                     ),
                     min_similarity=float(near_cfg.get("min_similarity", 0.92)),
-                    review_mode=str(near_cfg.get("review_mode", "off")),
+                    review_mode=str(near_cfg.get("review_mode", "off")).strip().lower(),
                     review_workers=int(near_cfg.get("review_workers", 24)),
                     overwrite_review_assets=bool(
                         near_cfg.get("overwrite_review_assets", False)

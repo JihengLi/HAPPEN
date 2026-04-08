@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Union
 
 import pandas as pd
+import numpy as np
 
 
 def atomic_write_csv(df: pd.DataFrame, out_path: Path) -> None:
@@ -277,253 +278,6 @@ def build_scan_candidates(
     return out_csv
 
 
-def _read_scan_candidates(
-    in_csv: Union[str, Path],
-) -> pd.DataFrame:
-    in_csv = Path(in_csv)
-
-    required_cols = [
-        "dataset_a",
-        "subject_id_a",
-        "session_id_a",
-        "candidate_a",
-        "resolved_path_a",
-        "scan_uid_a",
-        "dataset_b",
-        "subject_id_b",
-        "session_id_b",
-        "candidate_b",
-        "resolved_path_b",
-        "scan_uid_b",
-        "similarity",
-        "best_rank",
-        "n_directions",
-    ]
-
-    df = pd.read_csv(in_csv, dtype=str).fillna("")
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"{in_csv} is missing required columns: {missing}")
-
-    for c in required_cols:
-        df[c] = df[c].fillna("").astype(str)
-
-    df["similarity"] = pd.to_numeric(df["similarity"], errors="raise").astype(float)
-    df["best_rank"] = pd.to_numeric(df["best_rank"], errors="raise").astype(int)
-    df["n_directions"] = pd.to_numeric(df["n_directions"], errors="raise").astype(int)
-
-    return df
-
-
-def build_scan_groups(
-    scan_candidates_csv: Union[str, Path],
-    out_csv: Union[str, Path],
-    modality: str = "T1w",
-) -> Path:
-    scan_candidates_csv = Path(scan_candidates_csv)
-    out_csv = Path(out_csv)
-
-    df = _read_scan_candidates(scan_candidates_csv)
-
-    out_cols = [
-        "group_id",
-        "modality",
-        "dataset",
-        "subject_id",
-        "session_id",
-        "candidate",
-        "resolved_path",
-    ]
-
-    if df.empty:
-        out_df = pd.DataFrame(columns=out_cols)
-        atomic_write_csv(out_df, out_csv)
-        return out_csv
-
-    uf = UnionFind()
-
-    scan_meta: Dict[str, Tuple[str, str, str, str, str]] = {}
-    # scan_uid -> (dataset, subject_id, session_id, candidate, resolved_path)
-
-    for _, r in df.iterrows():
-        sua = str(r["scan_uid_a"]).strip()
-        sub = str(r["scan_uid_b"]).strip()
-
-        if not sua or not sub or sua == sub:
-            continue
-
-        uf.add(sua)
-        uf.add(sub)
-        uf.union(sua, sub)
-
-        if sua not in scan_meta:
-            scan_meta[sua] = (
-                str(r["dataset_a"]),
-                str(r["subject_id_a"]),
-                str(r["session_id_a"]),
-                str(r["candidate_a"]),
-                str(r["resolved_path_a"]),
-            )
-
-        if sub not in scan_meta:
-            scan_meta[sub] = (
-                str(r["dataset_b"]),
-                str(r["subject_id_b"]),
-                str(r["session_id_b"]),
-                str(r["candidate_b"]),
-                str(r["resolved_path_b"]),
-            )
-
-    if not scan_meta:
-        out_df = pd.DataFrame(columns=out_cols)
-        atomic_write_csv(out_df, out_csv)
-        return out_csv
-
-    comp_map: Dict[str, List[str]] = {}
-    for scan_uid in sorted(scan_meta.keys()):
-        root = uf.find(scan_uid)
-        comp_map.setdefault(root, []).append(scan_uid)
-
-    comps = [sorted(v) for v in comp_map.values() if len(v) > 1]
-    comps = sorted(comps, key=lambda xs: (len(xs), xs[0]))
-
-    rows: List[Dict[str, object]] = []
-    for i, comp in enumerate(comps, start=1):
-        group_id = f"group_{i:06d}"
-        for scan_uid in comp:
-            ds, sid, ses, cand, resolved = scan_meta[scan_uid]
-            rows.append(
-                {
-                    "group_id": group_id,
-                    "modality": modality,
-                    "dataset": ds,
-                    "subject_id": sid,
-                    "session_id": ses,
-                    "candidate": cand,
-                    "resolved_path": resolved,
-                }
-            )
-
-    out_df = pd.DataFrame(rows, columns=out_cols)
-
-    if not out_df.empty:
-        out_df = out_df.sort_values(
-            ["group_id", "dataset", "subject_id", "session_id", "candidate"],
-            kind="mergesort",
-        ).reset_index(drop=True)
-
-    atomic_write_csv(out_df, out_csv)
-
-    print(
-        f"[NEAR GROUP] scan groups: {out_df['group_id'].nunique() if not out_df.empty else 0:,}"
-    )
-    print(f"[NEAR GROUP] scan-group rows: {len(out_df):,}")
-    print(f"[NEAR GROUP] saved -> {out_csv}")
-
-    return out_csv
-
-
-def build_subject_edges(
-    scan_candidates_csv: Union[str, Path],
-    out_csv: Union[str, Path],
-) -> Path:
-    scan_candidates_csv = Path(scan_candidates_csv)
-    out_csv = Path(out_csv)
-
-    df = _read_scan_candidates(scan_candidates_csv)
-
-    if df.empty:
-        out_df = pd.DataFrame(
-            columns=[
-                "dataset_a",
-                "subject_id_a",
-                "subject_key_a",
-                "dataset_b",
-                "subject_id_b",
-                "subject_key_b",
-                "max_similarity",
-                "n_scan_pairs",
-                "exemplar_scan_uid_a",
-                "exemplar_scan_uid_b",
-                "exemplar_candidate_a",
-                "exemplar_candidate_b",
-                "exemplar_resolved_path_a",
-                "exemplar_resolved_path_b",
-            ]
-        )
-        atomic_write_csv(out_df, out_csv)
-        return out_csv
-
-    df["subject_key_a"] = df.apply(
-        lambda r: _subject_key(r["dataset_a"], r["subject_id_a"]), axis=1
-    )
-    df["subject_key_b"] = df.apply(
-        lambda r: _subject_key(r["dataset_b"], r["subject_id_b"]), axis=1
-    )
-
-    rows: List[Dict[str, object]] = []
-
-    for (ska, skb), g in df.groupby(["subject_key_a", "subject_key_b"], sort=False):
-        g = g.sort_values(
-            ["similarity", "best_rank"],
-            ascending=[False, True],
-            kind="mergesort",
-        ).reset_index(drop=True)
-        best = g.iloc[0]
-
-        rows.append(
-            {
-                "dataset_a": best["dataset_a"],
-                "subject_id_a": best["subject_id_a"],
-                "subject_key_a": ska,
-                "dataset_b": best["dataset_b"],
-                "subject_id_b": best["subject_id_b"],
-                "subject_key_b": skb,
-                "max_similarity": float(g["similarity"].max()),
-                "n_scan_pairs": int(len(g)),
-                "exemplar_scan_uid_a": best["scan_uid_a"],
-                "exemplar_scan_uid_b": best["scan_uid_b"],
-                "exemplar_candidate_a": best["candidate_a"],
-                "exemplar_candidate_b": best["candidate_b"],
-                "exemplar_resolved_path_a": best["resolved_path_a"],
-                "exemplar_resolved_path_b": best["resolved_path_b"],
-            }
-        )
-
-    out_df = pd.DataFrame(
-        rows,
-        columns=[
-            "dataset_a",
-            "subject_id_a",
-            "subject_key_a",
-            "dataset_b",
-            "subject_id_b",
-            "subject_key_b",
-            "max_similarity",
-            "n_scan_pairs",
-            "exemplar_scan_uid_a",
-            "exemplar_scan_uid_b",
-            "exemplar_candidate_a",
-            "exemplar_candidate_b",
-            "exemplar_resolved_path_a",
-            "exemplar_resolved_path_b",
-        ],
-    )
-
-    out_df = out_df.sort_values(
-        ["subject_key_a", "subject_key_b", "max_similarity"],
-        ascending=[True, True, False],
-        kind="mergesort",
-    ).reset_index(drop=True)
-
-    atomic_write_csv(out_df, out_csv)
-
-    print(f"[NEAR GROUP] subject edge rows: {len(out_df):,}")
-    print(f"[NEAR GROUP] saved -> {out_csv}")
-
-    return out_csv
-
-
 class UnionFind:
     def __init__(self):
         self.parent: Dict[str, str] = {}
@@ -555,6 +309,141 @@ class UnionFind:
             self.rank[ra] += 1
 
 
+def _read_review_decisions(
+    in_csv: Union[str, Path],
+) -> pd.DataFrame:
+    in_csv = Path(in_csv)
+
+    required_cols = [
+        "dataset_1",
+        "subject_id_1",
+        "session_id_1",
+        "path_1",
+        "dataset_2",
+        "subject_id_2",
+        "session_id_2",
+        "path_2",
+        "QA_status",
+        "reason",
+        "date",
+    ]
+
+    df = pd.read_csv(in_csv, dtype=str).fillna("")
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"{in_csv} is missing required columns: {missing}")
+
+    for c in required_cols:
+        df[c] = df[c].fillna("").astype(str).str.strip()
+
+    return df
+
+
+def build_subject_edges(
+    review_decisions_csv: Union[str, Path],
+    out_csv: Union[str, Path],
+) -> Path:
+    review_decisions_csv = Path(review_decisions_csv)
+    out_csv = Path(out_csv)
+
+    df = _read_review_decisions(review_decisions_csv)
+
+    out_cols = [
+        "dataset_a",
+        "subject_id_a",
+        "subject_key_a",
+        "dataset_b",
+        "subject_id_b",
+        "subject_key_b",
+        "n_yes_scan_pairs",
+    ]
+
+    if df.empty:
+        atomic_write_csv(pd.DataFrame(columns=out_cols), out_csv)
+        return out_csv
+
+    df = df[df["QA_status"].str.lower() == "yes"].copy()
+
+    if df.empty:
+        atomic_write_csv(pd.DataFrame(columns=out_cols), out_csv)
+        print("[NEAR GROUP] no confirmed ('yes') review decisions found")
+        print(f"[NEAR GROUP] saved -> {out_csv}")
+        return out_csv
+
+    df = df[
+        (df["dataset_1"] != "")
+        & (df["subject_id_1"] != "")
+        & (df["dataset_2"] != "")
+        & (df["subject_id_2"] != "")
+    ].copy()
+
+    if df.empty:
+        atomic_write_csv(pd.DataFrame(columns=out_cols), out_csv)
+        print("[NEAR GROUP] no valid confirmed subject pairs after filtering empty IDs")
+        print(f"[NEAR GROUP] saved -> {out_csv}")
+        return out_csv
+
+    df["subject_key_1"] = df.apply(
+        lambda r: _subject_key(r["dataset_1"], r["subject_id_1"]),
+        axis=1,
+    )
+    df["subject_key_2"] = df.apply(
+        lambda r: _subject_key(r["dataset_2"], r["subject_id_2"]),
+        axis=1,
+    )
+
+    df = df[df["subject_key_1"] != df["subject_key_2"]].copy()
+
+    if df.empty:
+        atomic_write_csv(pd.DataFrame(columns=out_cols), out_csv)
+        print("[NEAR GROUP] no confirmed cross-subject review decisions found")
+        print(f"[NEAR GROUP] saved -> {out_csv}")
+        return out_csv
+
+    # canonicalize undirected subject pair ordering
+    flip = df["subject_key_1"] > df["subject_key_2"]
+
+    df["dataset_a"] = np.where(flip, df["dataset_2"], df["dataset_1"])
+    df["subject_id_a"] = np.where(flip, df["subject_id_2"], df["subject_id_1"])
+    df["subject_key_a"] = np.where(flip, df["subject_key_2"], df["subject_key_1"])
+
+    df["dataset_b"] = np.where(flip, df["dataset_1"], df["dataset_2"])
+    df["subject_id_b"] = np.where(flip, df["subject_id_1"], df["subject_id_2"])
+    df["subject_key_b"] = np.where(flip, df["subject_key_1"], df["subject_key_2"])
+
+    rows: List[Dict[str, object]] = []
+
+    for (ska, skb), g in df.groupby(["subject_key_a", "subject_key_b"], sort=False):
+        best = g.iloc[0]
+
+        rows.append(
+            {
+                "dataset_a": best["dataset_a"],
+                "subject_id_a": best["subject_id_a"],
+                "subject_key_a": ska,
+                "dataset_b": best["dataset_b"],
+                "subject_id_b": best["subject_id_b"],
+                "subject_key_b": skb,
+                "n_yes_scan_pairs": int(len(g)),
+            }
+        )
+
+    out_df = pd.DataFrame(rows, columns=out_cols)
+
+    if not out_df.empty:
+        out_df = out_df.sort_values(
+            ["subject_key_a", "subject_key_b"],
+            kind="mergesort",
+        ).reset_index(drop=True)
+
+    atomic_write_csv(out_df, out_csv)
+
+    print(f"[NEAR GROUP] confirmed subject edge rows: {len(out_df):,}")
+    print(f"[NEAR GROUP] saved -> {out_csv}")
+
+    return out_csv
+
+
 def _read_subject_edges(
     in_csv: Union[str, Path],
 ) -> pd.DataFrame:
@@ -567,14 +456,7 @@ def _read_subject_edges(
         "dataset_b",
         "subject_id_b",
         "subject_key_b",
-        "max_similarity",
-        "n_scan_pairs",
-        "exemplar_scan_uid_a",
-        "exemplar_scan_uid_b",
-        "exemplar_candidate_a",
-        "exemplar_candidate_b",
-        "exemplar_resolved_path_a",
-        "exemplar_resolved_path_b",
+        "n_yes_scan_pairs",
     ]
 
     df = pd.read_csv(in_csv, dtype=str).fillna("")
@@ -585,10 +467,9 @@ def _read_subject_edges(
     for c in required_cols:
         df[c] = df[c].fillna("").astype(str)
 
-    df["max_similarity"] = pd.to_numeric(df["max_similarity"], errors="raise").astype(
-        float
-    )
-    df["n_scan_pairs"] = pd.to_numeric(df["n_scan_pairs"], errors="raise").astype(int)
+    df["n_yes_scan_pairs"] = pd.to_numeric(
+        df["n_yes_scan_pairs"], errors="raise"
+    ).astype(int)
 
     return df
 
@@ -622,8 +503,8 @@ def build_subject_groups(
         ska = str(r["subject_key_a"])
         skb = str(r["subject_key_b"])
 
-        ufa = str(r["dataset_a"])
-        ufb = str(r["dataset_b"])
+        dsa = str(r["dataset_a"])
+        dsb = str(r["dataset_b"])
         sia = str(r["subject_id_a"])
         sib = str(r["subject_id_b"])
 
@@ -631,8 +512,8 @@ def build_subject_groups(
         uf.add(skb)
         uf.union(ska, skb)
 
-        subject_meta[ska] = (ufa, sia)
-        subject_meta[skb] = (ufb, sib)
+        subject_meta[ska] = (dsa, sia)
+        subject_meta[skb] = (dsb, sib)
 
     comp_map: Dict[str, List[str]] = {}
     for key in sorted(subject_meta.keys()):
@@ -685,37 +566,3 @@ def build_subject_groups(
     print(f"[NEAR GROUP] saved -> {out_csv}")
 
     return out_csv
-
-
-def run_grouping(
-    raw_neighbors_csv: Union[str, Path],
-    out_scan_candidates_csv: Union[str, Path],
-    out_scan_groups_csv: Union[str, Path],
-    out_subject_edges_csv: Union[str, Path],
-    out_subject_groups_csv: Union[str, Path],
-    min_similarity: float,
-    modality: str = "T1w",
-) -> Tuple[Path, Path, Path, Path]:
-    scan_candidates_csv = build_scan_candidates(
-        raw_neighbors_csv=raw_neighbors_csv,
-        out_csv=out_scan_candidates_csv,
-        min_similarity=min_similarity,
-    )
-
-    scan_groups_csv = build_scan_groups(
-        scan_candidates_csv=scan_candidates_csv,
-        out_csv=out_scan_groups_csv,
-        modality=modality,
-    )
-
-    subject_edges_csv = build_subject_edges(
-        scan_candidates_csv=scan_candidates_csv,
-        out_csv=out_subject_edges_csv,
-    )
-
-    subject_groups_csv = build_subject_groups(
-        subject_edges_csv=subject_edges_csv,
-        out_csv=out_subject_groups_csv,
-    )
-
-    return scan_candidates_csv, scan_groups_csv, subject_edges_csv, subject_groups_csv

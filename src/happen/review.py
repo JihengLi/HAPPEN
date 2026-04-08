@@ -16,12 +16,14 @@ from typing import Any, Dict, Union
 from .review_app import loader
 from .review_app.app import create_app
 from .review_app.store import DecisionStore
+from .near import finalize_near_stage_from_review
 
 
 @dataclass
 class ReviewConfig:
     config_path: Path
     out_dir: Path
+    modality: str
     review_mode: str
     png_root: Path
     candidates_csv: Path
@@ -69,6 +71,7 @@ def _build_review_config(config_path: Union[str, Path]) -> ReviewConfig:
         raise ValueError("[run].out is required")
 
     out_dir = Path(str(out)).expanduser().resolve()
+    modality = str(run_cfg.get("modality", "T1w")).strip()
 
     review_mode = str(near_cfg.get("review_mode", "off")).strip().lower()
     if review_mode not in {"off", "lazy", "precompute"}:
@@ -88,6 +91,7 @@ def _build_review_config(config_path: Union[str, Path]) -> ReviewConfig:
     return ReviewConfig(
         config_path=config_path,
         out_dir=out_dir,
+        modality=modality,
         review_mode=review_mode,
         png_root=png_root,
         candidates_csv=candidates_csv,
@@ -186,12 +190,46 @@ def run_review_app(cfg: ReviewConfig) -> int:
     return 0
 
 
+def run_review_finalize(cfg: ReviewConfig) -> int:
+    logging.info("[REVIEW] finalize mode")
+    logging.info("[REVIEW] near_dir -> %s", cfg.out_dir / "near")
+    logging.info("[REVIEW] decisions_csv -> %s", cfg.decisions_csv)
+
+    if not cfg.decisions_csv.exists():
+        logging.error(
+            "[REVIEW] review_decisions.csv does not exist: %s",
+            cfg.decisions_csv,
+        )
+        return 2
+
+    try:
+        finalize_near_stage_from_review(
+            out_dir=cfg.out_dir,
+            modality=cfg.modality,
+        )
+    except Exception:
+        logging.exception("[REVIEW] finalize failed.")
+        return 1
+
+    logging.info("[REVIEW] finalize done.")
+    return 0
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Run review app.")
+    ap = argparse.ArgumentParser(
+        description="Run review app or finalize reviewed outputs."
+    )
     ap.add_argument(
         "config",
         type=Path,
         help="Path to review config TOML file",
+    )
+    ap.add_argument(
+        "command",
+        nargs="?",
+        default="serve",
+        choices=["serve", "finalize"],
+        help="serve: launch review app; finalize: generate confirmed reports from review_decisions.csv",
     )
     args = ap.parse_args()
 
@@ -207,6 +245,8 @@ def main() -> int:
     )
 
     try:
+        if args.command == "finalize":
+            return run_review_finalize(cfg)
         return run_review_app(cfg)
     except Exception:
         logging.exception("[REVIEW] Unhandled exception.")

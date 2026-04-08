@@ -83,7 +83,6 @@ print(f"EXACT_ROOT={get_path('exact', 'root')}")
 print(f"EXACT_CANDIDATES_CSV={get_path('exact', 'candidates_csv')}")
 print(f"EXACT_VALID_CSV={get_path('exact', 'valid_csv')}")
 print(f"REVIEW_PORT={get_str('review', 'port', default='5291') or '5291'}")
-print(f"REVIEW_HOST={get_str('review', 'host', default='')}")
 PY
 }
 
@@ -93,23 +92,55 @@ is_same_or_within() {
   [[ "$child" == "$parent" || "$child" == "$parent/"* ]]
 }
 
+usage() {
+  cat <<EOF
+Usage:
+  $0 pipeline <config.toml> [--bind <path>]...
+  $0 review <config.toml> [finalize] [--bind <path>]...
+EOF
+}
+
 declare -a EXTRA_BINDS
 declare -a DOCKER_ARGS
 declare -a MOUNTS
+
+if [[ $# -lt 2 ]]; then
+  usage
+  exit 2
+fi
 
 MODE="$1"
 CONFIG_INPUT="$2"
 shift 2
 
+REVIEW_SUBCOMMAND=""
+
+if [[ "$MODE" != "pipeline" && "$MODE" != "review" ]]; then
+  echo "[run_happen][ERROR] mode must be 'pipeline' or 'review'"
+  usage
+  exit 2
+fi
+
+if [[ "$MODE" == "review" && $# -gt 0 ]]; then
+  case "$1" in
+    finalize)
+      REVIEW_SUBCOMMAND="$1"
+      shift
+      ;;
+  esac
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --bind)
       shift
+      [[ $# -gt 0 ]] || { echo "[run_happen][ERROR] --bind requires a path"; exit 2; }
       EXTRA_BINDS+=("$(normalize_abs_path "$1")")
       ;;
-    --image)
-      shift
-      IMAGE="$1"
+    *)
+      echo "[run_happen][ERROR] unknown argument: $1"
+      usage
+      exit 2
       ;;
   esac
   shift
@@ -127,7 +158,6 @@ while IFS='=' read -r key value; do
     EXACT_CANDIDATES_CSV) EXACT_CANDIDATES_CSV="$value" ;;
     EXACT_VALID_CSV) EXACT_VALID_CSV="$value" ;;
     REVIEW_PORT) REVIEW_PORT="$value" ;;
-    REVIEW_HOST) REVIEW_HOST="$value" ;;
   esac
 done < <(parse_config "$CONFIG_INPUT" "$CONFIG_DIR")
 
@@ -173,7 +203,7 @@ done
 
 DOCKER_ARGS+=(-w "$CONFIG_DIR")
 
-if [[ "$MODE" == "review" ]]; then
+if [[ "$MODE" == "review" && "$REVIEW_SUBCOMMAND" != "finalize" ]]; then
   DOCKER_ARGS+=(-p "${REVIEW_PORT}:${REVIEW_PORT}")
 fi
 
@@ -187,7 +217,11 @@ if [[ "$MODE" == "pipeline" ]]; then
   [[ -z "${EXACT_CANDIDATES_CSV:-}" ]] || echo "[run_happen] candidates  -> $EXACT_CANDIDATES_CSV"
   [[ -z "${EXACT_VALID_CSV:-}" ]] || echo "[run_happen] valid_csv   -> $EXACT_VALID_CSV"
 else
-  echo "[run_happen] review port -> $REVIEW_PORT"
+  if [[ "$REVIEW_SUBCOMMAND" == "finalize" ]]; then
+    echo "[run_happen] review cmd  -> finalize"
+  else
+    echo "[run_happen] review port -> $REVIEW_PORT"
+  fi
 fi
 
 for b in "${EXTRA_BINDS[@]:-}"; do
@@ -195,4 +229,8 @@ for b in "${EXTRA_BINDS[@]:-}"; do
 done
 
 DOCKER_ARGS+=("$IMAGE" "$MODE" "$CONFIG_INPUT")
+if [[ -n "$REVIEW_SUBCOMMAND" ]]; then
+  DOCKER_ARGS+=("$REVIEW_SUBCOMMAND")
+fi
+
 exec "${DOCKER_ARGS[@]}"

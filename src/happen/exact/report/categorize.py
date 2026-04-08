@@ -40,34 +40,8 @@ def _read_base_csv(
     if modality:
         df = df[df["modality"] == modality].copy()
 
-    return df.reset_index(drop=True)
-
-
-def _read_base_dir(
-    in_dir: Union[str, Path],
-    modality: Optional[str] = None,
-) -> pd.DataFrame:
-    in_dir = Path(in_dir)
-
-    dfs: List[pd.DataFrame] = []
-    for p in sorted(in_dir.glob("*.csv")):
-        dfp = pd.read_csv(p, dtype=str, usecols=lambda c: c in BASE_REQUIRED_COLS)
-        missing = [c for c in BASE_REQUIRED_COLS if c not in dfp.columns]
-        if missing:
-            raise ValueError(f"{p} missing required columns: {missing}")
-        dfp = dfp[BASE_REQUIRED_COLS].copy()
-        for c in BASE_REQUIRED_COLS:
-            dfp[c] = dfp[c].fillna("").astype(str)
-        dfs.append(dfp)
-
-    if not dfs:
-        return pd.DataFrame(columns=BASE_REQUIRED_COLS)
-
-    df = pd.concat(dfs, ignore_index=True)
-    if modality:
-        df = df[df["modality"] == modality].copy()
-
-    return df.reset_index(drop=True)
+    df = df.drop_duplicates(subset=BASE_REQUIRED_COLS).reset_index(drop=True)
+    return df
 
 
 def _write_csv(df: pd.DataFrame, out_csv: Path) -> None:
@@ -139,6 +113,12 @@ def report_by_dataset(
     modality: Optional[str] = None,
     sort_cols_detail: Tuple[str, ...] = ("group_id", "resolved_path"),
 ) -> bool:
+    """
+    Write one CSV per dataset.
+
+    Important guarantee:
+    every group written into each dataset CSV has at least 2 rows.
+    """
     in_csv = Path(in_csv)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -164,8 +144,8 @@ def report_by_dataset(
         if df_d.empty:
             continue
 
-        sizes = df_d.groupby("group_id")["resolved_path"].nunique()
-        keep_gids = set(sizes.index[sizes.values > 1])
+        gsize = df_d.groupby("group_id").size()
+        keep_gids = set(gsize[gsize >= 2].index)
         df_dups = df_d[df_d["group_id"].isin(keep_gids)].copy()
 
         if df_dups.empty:
@@ -180,19 +160,31 @@ def report_by_dataset(
 
 
 def report_by_category(
-    in_dir: Union[str, Path],
+    in_csv: Union[str, Path],
     out_dir: Union[str, Path],
     out_stats_dir: Union[str, Path],
     modality: Optional[str] = None,
 ) -> bool:
-    in_dir = Path(in_dir)
+    """
+    Build category reports directly from the original input CSV.
+
+    This avoids reading back by_dataset/*.csv as an intermediate source.
+    """
+    in_csv = Path(in_csv)
     out_dir = Path(out_dir)
     out_stats_dir = Path(out_stats_dir)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_stats_dir.mkdir(parents=True, exist_ok=True)
 
-    df0 = _read_base_dir(in_dir, modality=modality)
+    df0 = _read_base_csv(in_csv, modality=modality)
+    df0 = df0[df0["dataset"] != ""].copy()
+
+    # Keep only groups with >= 2 rows globally.
+    if not df0.empty:
+        gsize_all = df0.groupby("group_id").size()
+        dup_gids_all = set(gsize_all[gsize_all >= 2].index)
+        df0 = df0[df0["group_id"].isin(dup_gids_all)].copy()
 
     # ---------- 1) within sessions ----------
     within_sessions_cols = ["dataset", "subject_id", "session_id"]
@@ -205,21 +197,29 @@ def report_by_category(
 
         triple_uni = df.groupby("group_id")["triple"].nunique()
         first_subj = df.groupby("group_id")["subject_id"].first()
+        gsize = df.groupby("group_id").size()
 
-        keep_gids = set(triple_uni[triple_uni == 1].index) & set(
-            first_subj[first_subj != ""].index
+        keep_gids = (
+            set(triple_uni[triple_uni == 1].index)
+            & set(first_subj[first_subj != ""].index)
+            & set(gsize[gsize >= 2].index)
         )
         df_keep = df[df["group_id"].isin(keep_gids)].copy()
 
         for gid, sub in df_keep.groupby("group_id", sort=False):
+            if len(sub) < 2:
+                continue
+
             ds = sub.iloc[0]["dataset"]
             subid = sub.iloc[0]["subject_id"]
             ses = sub.iloc[0]["session_id"]
 
             sub = sub.sort_values(["resolved_path", "candidate"], kind="mergesort")
             pairs = list(zip(sub["candidate"].tolist(), sub["resolved_path"].tolist()))
-            max_n_within_sessions = max(max_n_within_sessions, len(pairs))
+            if len(pairs) < 2:
+                continue
 
+            max_n_within_sessions = max(max_n_within_sessions, len(pairs))
             within_sessions_rows.append(
                 {
                     "dataset": ds,
@@ -270,10 +270,6 @@ def report_by_category(
 
     if not df0.empty:
         df = df0.copy()
-        gsize_all = df.groupby("group_id").size()
-        dup_gids_all = set(gsize_all[gsize_all > 1].index)
-
-        df = df[df["group_id"].isin(dup_gids_all)].copy()
         df_nonempty_ses = df[df["session_id"] != ""].copy()
 
         if not df_nonempty_ses.empty:
@@ -308,6 +304,9 @@ def report_by_category(
             for (gid, ds, subj), sub in df_keep.groupby(
                 ["group_id", "dataset", "subject_id"], sort=False
             ):
+                if len(sub) < 2:
+                    continue
+
                 reps = (
                     sub.groupby("session_id", sort=True, dropna=False)
                     .nth(0)
@@ -366,9 +365,6 @@ def report_by_category(
 
     if not df0.empty:
         df = df0.copy()
-        gsize_all = df.groupby("group_id").size()
-        dup_gids_all = set(gsize_all[gsize_all > 1].index)
-        df = df[df["group_id"].isin(dup_gids_all)].copy()
 
         df = df.sort_values(
             [
@@ -383,6 +379,9 @@ def report_by_category(
         )
 
         for (gid, ds), sub in df.groupby(["group_id", "dataset"], sort=False):
+            if len(sub) < 2:
+                continue
+
             unique_subjects = {s for s in sub["subject_id"].astype(str) if s}
             if len(unique_subjects) < 2:
                 continue
@@ -395,6 +394,9 @@ def report_by_category(
                     sub["resolved_path"].tolist(),
                 )
             )
+            if len(items) < 2:
+                continue
+
             max_items_within_datasets = max(max_items_within_datasets, len(items))
             within_datasets_rows.append({"dataset": ds, "_items": items})
 
@@ -476,7 +478,7 @@ def report_by_category_across_datasets(
         return False
 
     gsize = df.groupby("group_id").size()
-    dup_gids = set(gsize[gsize > 1].index)
+    dup_gids = set(gsize[gsize >= 2].index)
     df = df[df["group_id"].isin(dup_gids)].copy()
 
     if df.empty:
@@ -507,7 +509,7 @@ def report_by_category_across_datasets(
     df_cross = df.merge(ds_sets_cross, on="group_id", how="inner")
     set_hist = (
         df_cross.groupby("set_key", dropna=False)["resolved_path"]
-        .size()
+        .nunique()
         .reset_index(name="n_images")
     )
     if not set_hist.empty:
@@ -532,6 +534,9 @@ def report_by_category_across_datasets(
     rows = []
     max_items = 0
     for gid, sub in df.groupby("group_id", sort=False):
+        if len(sub) < 2:
+            continue
+
         items = list(
             zip(
                 sub["dataset"].tolist(),
@@ -543,6 +548,7 @@ def report_by_category_across_datasets(
         )
         if len(items) < 2:
             continue
+
         max_items = max(max_items, len(items))
         rows.append({"_items": items})
 
@@ -603,7 +609,7 @@ def run_categorize_reports(
     )
 
     wrote_by_category = report_by_category(
-        in_dir=by_dataset_dir,
+        in_csv=in_csv,
         out_dir=by_category_dir,
         out_stats_dir=by_category_stats_dir,
         modality=modality,

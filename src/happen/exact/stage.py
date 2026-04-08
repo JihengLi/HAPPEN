@@ -18,7 +18,7 @@ from .hashing import (
     group_and_organize_duplicates,
 )
 from .verify import verify_all_categories
-from ..report import run_categorize_reports, visualize_file_matrix
+from .report import run_categorize_reports, visualize_file_matrix
 from ..utils.runtime_profile import RuntimeProfiler
 
 

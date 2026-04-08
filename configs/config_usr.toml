@@ -1,7 +1,9 @@
 [run]
 out = ""
 stages = ["exact", "near"]
+
 profile_runtime = true
+modality = "T1w"
 
 [exact]
 root = ""
@@ -9,8 +11,6 @@ candidates_csv = ""
 valid_csv = ""
 thread_workers = 32
 process_workers = 16
-
-modality = "T1w"
 
 [near]
 preprocess_workers = 16

@@ -2,12 +2,12 @@
 out = ""
 stages = ["exact", "near"]
 profile_runtime = true
+modality = "T1w"
 
 [exact]
 root = ""
 candidates_csv = ""
 valid_csv = ""
-modality = "T1w"
 thread_workers = 64
 process_workers = 32
 verify = false
