@@ -41,7 +41,7 @@ sudo docker pull <container_image>
 ### Container images and package locations
 
 - Recommended fixed version tag:
-  `ghcr.io/jihengli/happen:v0.1.1-cu128`
+  `ghcr.io/jihengli/happen:v0.1.2-cu128`
 
 - Convenience tag:
   `ghcr.io/jihengli/happen:latest`

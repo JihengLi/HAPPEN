@@ -58,6 +58,10 @@ def _empty_dataset_stats_csv(out_csv: Path) -> None:
     _write_csv(pd.DataFrame(columns=["dataset", "n_subjects"]), out_csv)
 
 
+def _empty_across_dataset_stats_csv(out_csv: Path) -> None:
+    _write_csv(pd.DataFrame(columns=["set_key", "n_subjects"]), out_csv)
+
+
 def _unique_nonempty_preserve_order(values: List[str]) -> List[str]:
     out: List[str] = []
     seen = set()
@@ -150,6 +154,61 @@ def _write_dataset_stats(detail_df: pd.DataFrame, stats_path: Path) -> None:
     if not stats.empty:
         stats = stats.sort_values(
             ["n_subjects", "dataset"],
+            ascending=[False, True],
+            kind="mergesort",
+        ).reset_index(drop=True)
+
+    _write_csv(stats, stats_path)
+
+
+def _write_across_dataset_set_stats(
+    df: pd.DataFrame,
+    stats_path: Path,
+) -> None:
+    if df.empty:
+        _empty_across_dataset_stats_csv(stats_path)
+        return
+
+    df = df[
+        (df["dataset"] != "") & (df["subject_id"] != "") & (df["subject_key"] != "")
+    ].copy()
+
+    if df.empty:
+        _empty_across_dataset_stats_csv(stats_path)
+        return
+
+    df = df.drop_duplicates(subset=["group_id", "dataset", "subject_key"]).copy()
+
+    def _clean_set(s: pd.Series) -> list[str]:
+        vals = {x.strip() for x in s.dropna().astype(str) if x and x.strip()}
+        return sorted(vals)
+
+    ds_sets = (
+        df.groupby("group_id", dropna=False)["dataset"]
+        .apply(_clean_set)
+        .reset_index(name="datasets")
+    )
+    ds_sets["set_size"] = ds_sets["datasets"].map(len)
+    ds_sets["set_key"] = ds_sets["datasets"].map(lambda xs: "|".join(xs) if xs else "")
+
+    ds_sets_cross = ds_sets.loc[
+        ds_sets["set_size"] >= 2,
+        ["group_id", "set_key"],
+    ]
+
+    if ds_sets_cross.empty:
+        _empty_across_dataset_stats_csv(stats_path)
+        return
+
+    df_cross = df.merge(ds_sets_cross, on="group_id", how="inner")
+
+    stats = (
+        df_cross.groupby("set_key", dropna=False).size().reset_index(name="n_subjects")
+    )
+
+    if not stats.empty:
+        stats = stats.sort_values(
+            ["n_subjects", "set_key"],
             ascending=[False, True],
             kind="mergesort",
         ).reset_index(drop=True)
@@ -324,7 +383,7 @@ def report_by_category_across_datasets(
     ]
 
     if df.empty:
-        _empty_dataset_stats_csv(stats_csv)
+        _empty_across_dataset_stats_csv(stats_csv)
         _write_csv(pd.DataFrame(columns=empty_cols), out_csv)
         return False
 
@@ -336,9 +395,11 @@ def report_by_category_across_datasets(
     df = df[df["group_id"].isin(cross_gids)].copy()
 
     if df.empty:
-        _empty_dataset_stats_csv(stats_csv)
+        _empty_across_dataset_stats_csv(stats_csv)
         _write_csv(pd.DataFrame(columns=empty_cols), out_csv)
         return False
+
+    _write_across_dataset_set_stats(df, stats_csv)
 
     df = df.sort_values(
         ["group_id", "dataset", "subject_id"],
@@ -386,7 +447,6 @@ def report_by_category_across_datasets(
     out_df = pd.DataFrame(out_rows, columns=out_cols)
     out_df = _sort_if_not_empty(out_df, ["dataset_1", "subject_id_1"])
     _write_csv(out_df, out_csv)
-    _write_dataset_stats(out_df, stats_csv)
 
     print(
         f"[across_datasets] input rows: {len(df):,}, "
