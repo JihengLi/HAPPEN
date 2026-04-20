@@ -16,18 +16,21 @@ Instructions for using the review interface are provided in the **Review interfa
 
 ## Access the container image
 
-HAPPEN is distributed as a docker image through GitHub Container Registry (GHCR).
+HAPPEN is distributed through GitHub Container Registry (GHCR) in two forms:
+
+- a **Docker image**
+- a **Singularity/Apptainer SIF image**
 
 Before pulling the image, make sure that you have created a **GitHub Personal Access Token (classic)** with at least the `read:packages` scope.
 
-Then log in to GHCR and pull the image using one of the following:
+### Docker:
 
 ```bash
 export CR_PAT="<GITHUB_CLASSIC_PAT>"
 
 echo "$CR_PAT" | docker login ghcr.io -u <github_username> --password-stdin
 
-docker pull <container_image>
+docker pull <ghcr_container_image_tag>
 ```
 
 If your system requires `sudo` for Docker, use:
@@ -35,16 +38,33 @@ If your system requires `sudo` for Docker, use:
 ```bash
 echo "$CR_PAT" | sudo docker login ghcr.io -u <github_username> --password-stdin
 
-sudo docker pull <container_image>
+sudo docker pull <ghcr_container_image_tag>
 ```
 
-### Container images and package locations
+### Singularity
 
-- Recommended fixed version tag:
+```bash
+export CR_PAT="<GITHUB_CLASSIC_PAT>"
+
+echo "$CR_PAT" | apptainer registry login -u <github_username> --password-stdin oras://ghcr.io
+
+apptainer pull <destination_file_address>.sif <ghcr_container_image_tag>
+```
+
+> [!IMPORTANT]
+> Please do **not** use `sudo` for normal execution with Singularity/Apptainer.  
+> Singularity/Apptainer must be authenticated and pulled separately via `apptainer registry login` and `apptainer pull` using the `oras://` URI; do **not** use `docker pull` for the SIF image.
+
+### GHCR container image tags
+
+- Recommended fixed version Docker tag:
   `ghcr.io/jihengli/happen:v0.1.2-cu128`
 
-- Convenience tag:
+- Convenience Docker tag:
   `ghcr.io/jihengli/happen:latest`
+
+- Singularity/Apptainer SIF tag:
+  `oras://ghcr.io/jihengli/happen:v0.1.2-cu128-sif`
 
 - GitHub Package page:
   `https://github.com/users/JihengLi/packages/container/package/happen`
@@ -59,15 +79,15 @@ sudo docker pull <container_image>
 General command pattern:
 
 ```bash
-sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh <mode> <config> [finalize] [--bind <host_path> ...]
+[sudo] HAPPEN_IMAGE=<container_image> ./run_happen.sh <mode> <config> [finalize] [--bind <host_path> ...]
 ```
 
-| argument        | description                               |
-| --------------- | ----------------------------------------- |
-| container_image | `ghcr.io/jihengli/happen:latest`          |
-| mode            | `pipeline` or `review` depending on task  |
-| config          | user config file (TOML)                   |
-| host_path       | additional location to mount on container |
+| argument        | description                                                        |
+| --------------- | ------------------------------------------------------------------ |
+| container_image | Docker image name, or a local Singularity/Apptainer .sif file path |
+| mode            | `pipeline` or `review` depending on task                           |
+| config          | user config file (TOML)                                            |
+| host_path       | additional location to mount on container                          |
 
 ## Quick start
 
@@ -84,13 +104,13 @@ cp configs/config_usr.toml my_config.toml
 3. Run the full pipeline (mode set to `pipeline`):
 
 ```bash
-sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml
+HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml
 ```
 
 If your input data or output locations require additional host mounts, add one or more `--bind` arguments:
 
 ```bash
-sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml \
+HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml \
   --bind /path/to/host1 \
   --bind /path/to/host2
 ```
@@ -98,13 +118,13 @@ sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml \
 4. After the pipeline has finished, launch the review interface with:
 
 ```bash
-sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh review my_config.toml
+HAPPEN_IMAGE=<container_image> ./run_happen.sh review my_config.toml
 ```
 
 5. After the human review is complete, generate the finalized confirmed reports:
 
 ```bash
-sudo HAPPEN_IMAGE=<container_image> ./run_happen.sh review my_config.toml finalize
+HAPPEN_IMAGE=<container_image> ./run_happen.sh review my_config.toml finalize
 ```
 
 ## Input and configuration

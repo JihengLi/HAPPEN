@@ -5,6 +5,7 @@
 set -euo pipefail
 
 IMAGE="${HAPPEN_IMAGE:-happen:latest}"
+RUNTIME="${HAPPEN_RUNTIME:-auto}"
 
 normalize_abs_path() {
   local p="$1"
@@ -29,16 +30,80 @@ normalize_abs_path() {
   (cd "$dir" && printf '%s/%s\n' "$(pwd -P)" "$base")
 }
 
+detect_runtime() {
+  local image="$1"
+  local requested="$2"
+
+  case "$requested" in
+    docker|apptainer)
+      printf '%s\n' "$requested"
+      return
+      ;;
+    auto)
+      ;;
+    *)
+      echo "[run_happen][ERROR] HAPPEN_RUNTIME must be one of: auto, docker, apptainer"
+      exit 2
+      ;;
+  esac
+
+  if [[ "$image" == *.sif ]]; then
+    printf 'apptainer\n'
+    return
+  fi
+
+  if [[ "$image" == docker://* || "$image" == oras://* || "$image" == library://* || "$image" == shub://* ]]; then
+    printf 'apptainer\n'
+    return
+  fi
+
+  if [[ -d "$image" ]]; then
+    printf 'apptainer\n'
+    return
+  fi
+
+  printf 'docker\n'
+}
+
+resolve_apptainer_cmd() {
+  if command -v apptainer >/dev/null 2>&1; then
+    printf 'apptainer\n'
+    return
+  fi
+
+  if command -v singularity >/dev/null 2>&1; then
+    printf 'singularity\n'
+    return
+  fi
+
+  echo "[run_happen][ERROR] runtime resolved to apptainer, but neither 'apptainer' nor 'singularity' is available in PATH"
+  exit 127
+}
+
+RUNTIME="$(detect_runtime "$IMAGE" "$RUNTIME")"
+APPTAINER_CMD=""
+
+if [[ "$RUNTIME" == "apptainer" ]]; then
+  APPTAINER_CMD="$(resolve_apptainer_cmd)"
+fi
+
+is_same_or_within() {
+  local child="$1"
+  local parent="$2"
+  [[ "$child" == "$parent" || "$child" == "$parent/"* ]]
+}
+
 parse_config() {
   local config_path="$1"
   local config_dir="$2"
 
-  docker run --rm -i \
-    --entrypoint python \
-    -e HOST_CONFIG_DIR="$config_dir" \
-    -e HOST_CONFIG_ABS="$config_path" \
-    -v "$config_path:/tmp/happen_config.toml:ro" \
-    "$IMAGE" - /tmp/happen_config.toml <<'PY'
+  if [[ "$RUNTIME" == "docker" ]]; then
+    docker run --rm -i \
+      --entrypoint python \
+      -e HOST_CONFIG_DIR="$config_dir" \
+      -e HOST_CONFIG_ABS="$config_path" \
+      -v "$config_path:/tmp/happen_config.toml:ro" \
+      "$IMAGE" - /tmp/happen_config.toml <<'PY'
 import os
 import sys
 import tomllib
@@ -84,24 +149,64 @@ print(f"EXACT_CANDIDATES_CSV={get_path('exact', 'candidates_csv')}")
 print(f"EXACT_VALID_CSV={get_path('exact', 'valid_csv')}")
 print(f"REVIEW_PORT={get_str('review', 'port', default='5291') or '5291'}")
 PY
-}
+  else
+    APPTAINERENV_HOST_CONFIG_DIR="$config_dir" \
+    APPTAINERENV_HOST_CONFIG_ABS="$config_path" \
+    SINGULARITYENV_HOST_CONFIG_DIR="$config_dir" \
+    SINGULARITYENV_HOST_CONFIG_ABS="$config_path" \
+    "$APPTAINER_CMD" exec --cleanenv \
+      --bind "$config_path:/tmp/happen_config.toml:ro" \
+      "$IMAGE" python - /tmp/happen_config.toml <<'PY'
+import os
+import sys
+import tomllib
 
-is_same_or_within() {
-  local child="$1"
-  local parent="$2"
-  [[ "$child" == "$parent" || "$child" == "$parent/"* ]]
-}
+cfg_path = sys.argv[1]
+host_cfg_dir = os.environ["HOST_CONFIG_DIR"]
+host_cfg_abs = os.environ["HOST_CONFIG_ABS"]
 
-usage() {
-  cat <<EOF
-Usage:
-  $0 pipeline <config.toml> [--bind <path>]...
-  $0 review <config.toml> [finalize] [--bind <path>]...
-EOF
+with open(cfg_path, "rb") as f:
+    cfg = tomllib.load(f)
+
+def get_path(*keys):
+    cur = cfg
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return ""
+        cur = cur[k]
+    if cur is None:
+        return ""
+    s = str(cur).strip()
+    if not s:
+        return ""
+    s = os.path.expanduser(s)
+    if os.path.isabs(s):
+        return os.path.abspath(s)
+    return os.path.abspath(os.path.join(host_cfg_dir, s))
+
+def get_str(*keys, default=""):
+    cur = cfg
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    if cur is None:
+        return default
+    return str(cur).strip()
+
+print(f"CONFIG_ABS={host_cfg_abs}")
+print(f"CONFIG_DIR={host_cfg_dir}")
+print(f"RUN_OUT={get_path('run', 'out')}")
+print(f"EXACT_ROOT={get_path('exact', 'root')}")
+print(f"EXACT_CANDIDATES_CSV={get_path('exact', 'candidates_csv')}")
+print(f"EXACT_VALID_CSV={get_path('exact', 'valid_csv')}")
+print(f"REVIEW_PORT={get_str('review', 'port', default='5291') or '5291'}")
+PY
+  fi
 }
 
 declare -a EXTRA_BINDS
-declare -a DOCKER_ARGS
+declare -a ENGINE_ARGS
 declare -a MOUNT_PATHS
 
 declare -A MOUNT_MODE
@@ -220,26 +325,63 @@ build_mounts() {
 
 emit_mount_args() {
   local p
-  for p in "${MOUNT_PATHS[@]}"; do
-    DOCKER_ARGS+=(-v "${p}:${p}:${MOUNT_MODE[$p]}")
-  done
+  if [[ "$RUNTIME" == "docker" ]]; then
+    for p in "${MOUNT_PATHS[@]}"; do
+      ENGINE_ARGS+=(-v "${p}:${p}:${MOUNT_MODE[$p]}")
+    done
+  else
+    for p in "${MOUNT_PATHS[@]}"; do
+      ENGINE_ARGS+=(--bind "${p}:${p}:${MOUNT_MODE[$p]}")
+    done
+  fi
 }
 
-if [[ "$MODE" == "pipeline" ]]; then
-  DOCKER_ARGS=(docker run --rm --gpus all)
-else
-  DOCKER_ARGS=(docker run --rm)
-fi
+build_engine_args() {
+  if [[ "$RUNTIME" == "docker" ]]; then
+    if [[ "$MODE" == "pipeline" ]]; then
+      ENGINE_ARGS=(docker run --rm --gpus all)
+    else
+      ENGINE_ARGS=(docker run --rm)
+    fi
+  else
+    if [[ "$MODE" == "pipeline" ]]; then
+      ENGINE_ARGS=("$APPTAINER_CMD" run --cleanenv --nv)
+    else
+      ENGINE_ARGS=("$APPTAINER_CMD" run --cleanenv)
+    fi
+  fi
+}
 
+append_cwd_arg() {
+  if [[ "$RUNTIME" == "docker" ]]; then
+    ENGINE_ARGS+=(-w "$CONFIG_DIR")
+  else
+    ENGINE_ARGS+=(--cwd "$CONFIG_DIR")
+  fi
+}
+
+append_review_network_arg() {
+  if [[ "$MODE" != "review" || "$REVIEW_SUBCOMMAND" == "finalize" ]]; then
+    return 0
+  fi
+
+  if [[ "$RUNTIME" == "docker" ]]; then
+    ENGINE_ARGS+=(-p "${REVIEW_PORT}:${REVIEW_PORT}")
+  else
+    :
+  fi
+}
+
+build_engine_args
 build_mounts
 emit_mount_args
+append_cwd_arg
+append_review_network_arg
 
-DOCKER_ARGS+=(-w "$CONFIG_DIR")
-
-if [[ "$MODE" == "review" && "$REVIEW_SUBCOMMAND" != "finalize" ]]; then
-  DOCKER_ARGS+=(-p "${REVIEW_PORT}:${REVIEW_PORT}")
+echo "[run_happen] runtime -> $RUNTIME"
+if [[ "$RUNTIME" == "apptainer" ]]; then
+  echo "[run_happen] apptainer_cmd -> $APPTAINER_CMD"
 fi
-
 echo "[run_happen] image -> $IMAGE"
 echo "[run_happen] mode -> $MODE"
 echo "[run_happen] config -> $CONFIG_INPUT"
@@ -254,6 +396,9 @@ else
     echo "[run_happen] review cmd  -> finalize"
   else
     echo "[run_happen] review port -> $REVIEW_PORT"
+    if [[ "$RUNTIME" == "apptainer" ]]; then
+      echo "[run_happen] note -> apptainer uses host networking by default; no Docker-style -p mapping added"
+    fi
   fi
 fi
 
@@ -261,9 +406,16 @@ for p in "${MOUNT_PATHS[@]}"; do
   echo "[run_happen] mount -> ${p} (${MOUNT_MODE[$p]})"
 done
 
-DOCKER_ARGS+=("$IMAGE" "$MODE" "$CONFIG_INPUT")
+ENGINE_ARGS+=("$IMAGE" "$MODE" "$CONFIG_INPUT")
 if [[ -n "$REVIEW_SUBCOMMAND" ]]; then
-  DOCKER_ARGS+=("$REVIEW_SUBCOMMAND")
+  ENGINE_ARGS+=("$REVIEW_SUBCOMMAND")
 fi
 
-exec "${DOCKER_ARGS[@]}"
+if [[ "$RUNTIME" == "apptainer" ]]; then
+  exec env \
+    APPTAINERENV_TINI_SUBREAPER=1 \
+    SINGULARITYENV_TINI_SUBREAPER=1 \
+    "${ENGINE_ARGS[@]}"
+else
+  exec "${ENGINE_ARGS[@]}"
+fi
