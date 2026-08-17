@@ -96,8 +96,11 @@ def _choose_exact_representatives(
 
 
 def make_scan_uid(resolved_path: str) -> str:
-    s = str(resolved_path).strip()
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+    h = hashlib.sha256()
+    with open(resolved_path, "rb") as f:
+        for chunk in iter(lambda: f.read(4 * 1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def prepare_no_exact_dup(
