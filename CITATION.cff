@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "If you use HAPPEN in your research, please cite this software release."
+type: software
+
+title: "HAPPEN: Human-in-the-Loop Auditing Pipeline for Exact and Near Duplicates in MRI Repositories"
+
+abstract: >-
+  HAPPEN is a containerized framework for auditing identity duplication in
+  large T1-weighted brain MRI repositories. It detects exact and identity-level
+  near duplicates, supports human adjudication of candidate links, and produces
+  reviewer-confirmed subject groups.
+
+authors:
+  - family-names: "Li"
+    given-names: "Jiheng"
+    affiliation: "Vanderbilt University"
+    ocrid: "https://orcid.org/0009-0001-0638-1997"
+
+version: "0.1.3"
+date-released: "2026-08-17"
+doi: "10.5281/zenodo.21986366"
+url: "https://doi.org/10.5281/zenodo.21986366"
+repository-code: "https://github.com/JihengLi/HAPPEN"
+repository-artifact: "https://github.com/users/JihengLi/packages/container/package/happen"
+
+
+keywords:
+  - MRI
+  - neuroimaging
+  - data curation
+  - identity duplication
+  - duplicate detection
+  - human-in-the-loop
+  - research software

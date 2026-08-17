@@ -16,82 +16,79 @@ Instructions for using the review interface are provided in the **Review interfa
 
 ## Access the container image
 
-HAPPEN is distributed through GitHub Container Registry (GHCR) in two forms:
+HAPPEN 0.1.3 is distributed through [Zenodo](https://doi.org/10.5281/zenodo.21986366) as:
 
-- a **Docker image**
-- a **Singularity/Apptainer SIF image**
+- a **Singularity/Apptainer SIF image** containing the application, dependencies, and pretrained models
+- a **standalone launcher ZIP** containing the run-script, configuration template, citation metadata, and license notices
 
-Before pulling the image, make sure that you have created a **GitHub Personal Access Token (classic)** with at least the `read:packages` scope.
+Before downloading or using HAPPEN, read the [software license](LICENSE.pdf).
 
-### Docker:
+**Requirements:** Linux x86_64, Bash 4.3+, and Singularity or Apptainer. The GPU pipeline requires an NVIDIA GPU with a driver compatible with CUDA 12.8.
+
+### Zenodo download
+
+Download all five files listed under **Zenodo release files** from the same Zenodo record into one directory. From that directory, verify the downloads:
 
 ```bash
-export CR_PAT="<GITHUB_CLASSIC_PAT>"
-
-echo "$CR_PAT" | docker login ghcr.io -u <github_username> --password-stdin
-
-docker pull <ghcr_container_image_tag>
+sha256sum -c SHA256SUMS.txt
 ```
 
-If your system requires `sudo` for Docker, use:
+### Singularity / Apptainer
+
+Set the absolute SIF path before changing directories, then extract and prepare the standalone launcher:
 
 ```bash
-echo "$CR_PAT" | sudo docker login ghcr.io -u <github_username> --password-stdin
+export HAPPEN_IMAGE="$PWD/happen-v0.1.3-cu128.sif"
 
-sudo docker pull <ghcr_container_image_tag>
-```
-
-### Singularity
-
-```bash
-export CR_PAT="<GITHUB_CLASSIC_PAT>"
-
-echo "$CR_PAT" | apptainer registry login -u <github_username> --password-stdin oras://ghcr.io
-
-apptainer pull <destination_file_address>.sif <ghcr_container_image_tag>
+unzip happen-0.1.3-launcher.zip
+cd happen-0.1.3
+chmod +x run_happen.sh
 ```
 
 > [!IMPORTANT]
 > Please do **not** use `sudo` for normal execution with Singularity/Apptainer.  
-> Singularity/Apptainer must be authenticated and pulled separately via `apptainer registry login` and `apptainer pull` using the `oras://` URI; do **not** use `docker pull` for the SIF image.
+> Keep `HAPPEN_IMAGE` exported in the terminal used for the commands below. If you open a new terminal, set it again to the absolute path of the downloaded SIF.
 
-### GHCR container image tags
+### Zenodo release files
 
-- Recommended fixed version Docker tag:
-  `ghcr.io/jihengli/happen:v0.1.2-cu128`
+- Singularity/Apptainer SIF image:
+  `happen-v0.1.3-cu128.sif`
 
-- Convenience Docker tag:
-  `ghcr.io/jihengli/happen:latest`
+- Standalone launcher package:
+  `happen-0.1.3-launcher.zip`
 
-- Singularity/Apptainer SIF tag:
-  `oras://ghcr.io/jihengli/happen:v0.1.2-cu128-sif`
+- Complete software license:
+  `LICENSE.pdf`
 
-- GitHub Package page:
-  `https://github.com/users/JihengLi/packages/container/package/happen`
+- Standalone quick-start instructions:
+  `README.md`
+
+- Download checksums:
+  `SHA256SUMS.txt`
 
 ## Usage overview
 
 > [!IMPORTANT]
-> First, ensure you have cloned this repository.
-> HAPPEN is launched by executing the `run_happen.sh` script in the top level of this repository. This is the primary run-script for the project. It handles launching the container, setting up the required bind
+> First, download and extract the Zenodo launcher package as shown above.
+> HAPPEN is launched by executing the `run_happen.sh` script in the extracted `happen-0.1.3/` directory. It handles launching the container, setting up the required bind
 > mounts, and passing the selected mode and configuration file into the container. Do **not** try to run `run_happen.sh` inside the container.
 
-General command pattern:
+General command pattern, with `HAPPEN_IMAGE` exported as shown above:
 
 ```bash
-[sudo] HAPPEN_IMAGE=<container_image> ./run_happen.sh <mode> <config> [finalize] [--bind <host_path> ...]
+./run_happen.sh <mode> <config> [finalize] [--bind <host_path> ...]
 ```
 
 | argument        | description                                                        |
 | --------------- | ------------------------------------------------------------------ |
-| container_image | Docker image name, or a local Singularity/Apptainer .sif file path |
+| HAPPEN_IMAGE    | Environment variable containing the absolute path to the Zenodo SIF |
 | mode            | `pipeline` or `review` depending on task                           |
 | config          | user config file (TOML)                                            |
 | host_path       | additional location to mount on container                          |
 
 ## Quick start
 
-From the root of this repository:
+From the extracted `happen-0.1.3/` directory, with `HAPPEN_IMAGE` exported as shown above:
 
 1. Copy the user configuration template:
 
@@ -99,18 +96,18 @@ From the root of this repository:
 cp configs/config_usr.toml my_config.toml
 ```
 
-2. Edit `my_config.toml` and fill in the required paths.
+2. Edit `my_config.toml` and fill in the required paths using absolute paths.
 
 3. Run the full pipeline (mode set to `pipeline`):
 
 ```bash
-HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml
+./run_happen.sh pipeline my_config.toml
 ```
 
 If your input data or output locations require additional host mounts, add one or more `--bind` arguments:
 
 ```bash
-HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml \
+./run_happen.sh pipeline my_config.toml \
   --bind /path/to/host1 \
   --bind /path/to/host2
 ```
@@ -118,13 +115,13 @@ HAPPEN_IMAGE=<container_image> ./run_happen.sh pipeline my_config.toml \
 4. After the pipeline has finished, launch the review interface with:
 
 ```bash
-HAPPEN_IMAGE=<container_image> ./run_happen.sh review my_config.toml
+./run_happen.sh review my_config.toml
 ```
 
-5. After the human review is complete, generate the finalized confirmed reports:
+5. After the human review is complete, stop the review server with `Ctrl+C`, then generate the finalized confirmed reports:
 
 ```bash
-HAPPEN_IMAGE=<container_image> ./run_happen.sh review my_config.toml finalize
+./run_happen.sh review my_config.toml finalize
 ```
 
 ## Input and configuration
@@ -377,6 +374,10 @@ User can use keyboard navigation to change scans in `3. Review view`:
 
 - Left / Right arrow keys: switch between candidate scans for the same query scan
 - Up / Down arrow keys: switch between query scans or subjects within the same dataset
+
+## License
+
+HAPPEN is provided under Vanderbilt University's [Non-Exclusive Non-Commercial Academic Software License Agreement](LICENSE.pdf). Copyright © 2026 Vanderbilt University. Read the complete agreement before accessing, downloading, or using HAPPEN. It is available only to non-profit academic and/or research institutions for internal non-commercial research purposes. Diagnostic or treatment use and redistribution by licensees are not permitted. For commercial licensing, contact cttc@vanderbilt.edu.
 
 ## Third-party licenses
 
