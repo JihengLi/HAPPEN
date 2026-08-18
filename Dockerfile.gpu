@@ -2,6 +2,9 @@
 # Email: jiheng.li.1@vanderbilt.edu
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.0 /uv /uvx /bin/
+
 ARG HAPPEN_VERSION="0.1.3"
 ARG VCS_REF="unknown"
 
@@ -14,7 +17,6 @@ LABEL org.opencontainers.image.title="HAPPEN" \
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     UV_LINK_MODE=copy
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -40,11 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11-venv \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
-    && python3.11 /tmp/get-pip.py \
-    && rm -f /tmp/get-pip.py
-
-RUN python3.11 -m pip install --upgrade pip setuptools wheel uv
+RUN uv --version
 
 RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python \
     && ln -sf /usr/bin/python3.11 /usr/local/bin/python3
