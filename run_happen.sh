@@ -7,6 +7,17 @@ set -euo pipefail
 IMAGE="${HAPPEN_IMAGE:-happen:latest}"
 RUNTIME="${HAPPEN_RUNTIME:-auto}"
 
+HOST_UID="${HAPPEN_HOST_UID:-${SUDO_UID:-$(id -u)}}"
+HOST_GID="${HAPPEN_HOST_GID:-${SUDO_GID:-$(id -g)}}"
+
+declare -a DOCKER_CMD
+
+if [[ "${HAPPEN_DOCKER_SUDO:-0}" == "1" ]]; then
+  DOCKER_CMD=(sudo docker)
+else
+  DOCKER_CMD=(docker)
+fi
+
 normalize_abs_path() {
   local p="$1"
   p="${p/#\~/$HOME}"
@@ -98,7 +109,9 @@ parse_config() {
   local config_dir="$2"
 
   if [[ "$RUNTIME" == "docker" ]]; then
-    docker run --rm -i \
+    "${DOCKER_CMD[@]}" run --rm -i \
+      --user "${HOST_UID}:${HOST_GID}" \
+      --env HOME=/tmp \
       --entrypoint python \
       -e HOST_CONFIG_DIR="$config_dir" \
       -e HOST_CONFIG_ABS="$config_path" \
@@ -338,10 +351,16 @@ emit_mount_args() {
 
 build_engine_args() {
   if [[ "$RUNTIME" == "docker" ]]; then
+    ENGINE_ARGS=(
+      "${DOCKER_CMD[@]}"
+      run
+      --rm
+      --user "${HOST_UID}:${HOST_GID}"
+      --env HOME=/tmp
+    )
+
     if [[ "$MODE" == "pipeline" ]]; then
-      ENGINE_ARGS=(docker run --rm --gpus all)
-    else
-      ENGINE_ARGS=(docker run --rm)
+      ENGINE_ARGS+=(--gpus all)
     fi
   else
     if [[ "$MODE" == "pipeline" ]]; then
