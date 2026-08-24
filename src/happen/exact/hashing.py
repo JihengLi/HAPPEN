@@ -66,18 +66,17 @@ def hash_voxelbyte(path: Path) -> dict:
 
     h = hashlib.sha256()
     dataobj = can.dataobj
+    hash_dtype = np.dtype("<f4")
     try:
         if len(shape) == 4:
             for t in range(shape[3]):
                 arr = np.asanyarray(dataobj[..., t])
-                if not arr.flags.c_contiguous:
-                    arr = np.ascontiguousarray(arr)
+                arr = np.ascontiguousarray(arr, dtype=hash_dtype)
                 h.update(memoryview(arr))
                 del arr
         else:
             arr = np.asanyarray(dataobj)
-            if not arr.flags.c_contiguous:
-                arr = np.ascontiguousarray(arr)
+            arr = np.ascontiguousarray(arr, dtype=hash_dtype)
             h.update(memoryview(arr))
             del arr
     finally:
@@ -91,19 +90,12 @@ def hash_voxelbyte(path: Path) -> dict:
             pass
         del img, can, dataobj
 
-    dtype_str = str(
-        np.asanyarray(
-            nib.load(str(path)).dataobj
-            if len(shape) == 3
-            else nib.load(str(path)).dataobj[..., 0]
-        ).dtype
-    )
     return {
         "hash": h.hexdigest(),
         "shape": shape,
-        "dtype": dtype_str,
+        "dtype": hash_dtype.str,
         "zooms": zooms_r,
-        "geo_key": f"{shape[:3]}|{dtype_str}|{tuple(zooms_r[:3])}",
+        "geo_key": f"{shape[:3]}|{hash_dtype.str}|{tuple(zooms_r[:3])}",
     }
 
 
