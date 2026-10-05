@@ -1,0 +1,43 @@
+[run]
+out = ""
+stages = ["exact", "near"]
+
+profile_runtime = true
+modality = "T1w"
+
+[exact]
+root = ""
+candidates_csv = ""
+valid_csv = ""
+thread_workers = 32
+process_workers = 16
+
+[near]
+preprocess_workers = 16
+device = "auto"
+min_similarity = 0.92
+review_mode = "lazy" # off | lazy | precompute
+review_workers = 16
+
+batch_size = 16
+use_amp = true
+overwrite_embeddings = false
+fail_fast = false
+topk = 500
+retrieval_batch_size = 2048
+use_ivf = true
+nlist = 4096
+nprobe = 64
+train_size = 200000
+seed = 0
+overwrite_retrieval = false
+overwrite_review_assets = false
+max_scan_candidates_per_query = 100
+
+[review]
+port = 8000
+
+autosave_every = 1
+host = "0.0.0.0"
+preview_max_width = 1200
+debug = false

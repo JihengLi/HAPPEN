@@ -1,0 +1,4 @@
+# Generated release files stay local; tracked launcher/configuration files remain here.
+dist/
+*.sif
+__pycache__/
