@@ -9,9 +9,10 @@ ARG HAPPEN_VERSION="0.1.3"
 ARG VCS_REF="unknown"
 
 LABEL org.opencontainers.image.title="HAPPEN" \
-      org.opencontainers.image.source="https://github.com/MASI/HAPPEN" \
+      org.opencontainers.image.source="https://github.com/JihengLi/HAPPEN" \
       org.opencontainers.image.version="${HAPPEN_VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.licenses="LicenseRef-HAPPEN-NonCommercial-Academic" \
       org.opencontainers.image.authors="Jiheng Li <jiheng.li.1@vanderbilt.edu>"
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -109,7 +110,7 @@ ENV PATH="/opt/ants/bin:${PATH}" \
 # App install
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY pyproject.toml uv.lock README.md LICENSE LICENSE.pdf ./
 COPY src ./src
 COPY resources ./resources
 COPY docker/entrypoint.sh /usr/local/bin/happen-entrypoint
