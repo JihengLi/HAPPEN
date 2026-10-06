@@ -1,4 +1,4 @@
-# HAPPEN 0.1.3 — Quick start
+# HAPPEN 0.1.3 Quick start
 
 HAPPEN audits identity duplication in T1-weighted brain MRI repositories using exact-duplicate detection, pretrained similarity retrieval, and human review. Finalization generates reviewer-confirmed subject groups.
 
