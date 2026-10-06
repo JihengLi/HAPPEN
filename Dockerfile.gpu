@@ -110,7 +110,7 @@ ENV PATH="/opt/ants/bin:${PATH}" \
 # App install
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md LICENSE LICENSE.pdf ./
+COPY pyproject.toml uv.lock README.md LICENSE.pdf ./
 COPY src ./src
 COPY resources ./resources
 COPY docker/entrypoint.sh /usr/local/bin/happen-entrypoint

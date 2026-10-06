@@ -7,7 +7,6 @@ zenodo/
 ├── README.md
 ├── PUBLISHING.md
 ├── CITATION.cff
-├── LICENSE                    # notice pointing to the complete agreement
 ├── LICENSE.pdf                # unmodified official CTTC agreement
 ├── run_happen.sh
 ├── configs/config_usr.toml
@@ -57,7 +56,7 @@ The following command supplies the files required by the existing Dockerfile as 
 ```bash
 set -o pipefail
 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.DS_Store' \
-  -cf - Dockerfile.gpu .dockerignore pyproject.toml uv.lock README.md LICENSE LICENSE.pdf \
+  -cf - Dockerfile.gpu .dockerignore pyproject.toml uv.lock README.md LICENSE.pdf \
   src resources docker/entrypoint.sh | \
 sudo docker build --platform linux/amd64 -f Dockerfile.gpu \
   --build-arg HAPPEN_VERSION=0.1.3 \
@@ -80,7 +79,6 @@ From the repository root:
 ```bash
 export HAPPEN_IMAGE="$(pwd)/zenodo/happen-v0.1.3-cu128-license-check.sif"
 apptainer inspect --labels "$HAPPEN_IMAGE"
-apptainer exec "$HAPPEN_IMAGE" cat /app/LICENSE
 sha256sum LICENSE.pdf
 apptainer exec "$HAPPEN_IMAGE" sha256sum /app/LICENSE.pdf
 apptainer exec "$HAPPEN_IMAGE" python -c \
@@ -94,7 +92,7 @@ apptainer exec --nv "$HAPPEN_IMAGE" python -c \
   "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
 ```
 
-Confirm the license label is `LicenseRef-HAPPEN-NonCommercial-Academic`, the embedded agreement hash matches the repository PDF, and `/app/LICENSE` points to that agreement. Confirm version 0.1.3, the intended source revision, and x86_64/amd64 architecture in the SIF metadata. Check that model loading produces no missing or unexpected model-key warnings.
+Confirm the license label is `LicenseRef-HAPPEN-NonCommercial-Academic` and the embedded agreement hash matches the repository PDF. Confirm version 0.1.3, the intended source revision, and x86_64/amd64 architecture in the SIF metadata. Check that model loading produces no missing or unexpected model-key warnings.
 
 Use a small local MRI input for the complete documented pipeline, browser review, and finalization workflow. Run the launcher copy from `zenodo/`, not the original repository launcher:
 
