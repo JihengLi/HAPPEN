@@ -1,8 +1,20 @@
 # HAPPEN: Human-in-the-Loop Auditing Pipeline for Exact and Near Duplicates in MRI Repositories
 
-HAPPEN audits exact and near duplicates in T1-weighted brain MRI repositories and produces reviewer-confirmed subject groups.
+HAPPEN is a containerized system for auditing identity duplication in large T1-weighted brain MRI repositories. It consists of two major components:
 
-[Paper (arXiv preprint)](https://arxiv.org/abs/2610.09614) · [Container release](https://doi.org/10.5281/zenodo.21986366) · [License](LICENSE.pdf)
+- an auditing pipeline, which detects exact and near duplicates and generates reviewable outputs; and
+- a review interface, which supports human review and decision of the generated near-duplicate candidates.
+
+The auditing pipeline contains two stages:
+
+- **Stage I (`exact`)**: detects exact duplicates via SHA-256 voxel-array fingerprints.
+- **Stage II (`near`)**: detects identity-level near duplicates via a pretrained embedding model and FAISS similarity retrieval.
+
+Rather than automatically merging or deleting files, HAPPEN generates reviewable reports and candidate lists for human review. These outputs can then be examined in the built-in review interface.
+
+Instructions for using the review interface are provided in the **Review interface** section.
+
+**Paper (arXiv preprint):** [Identity-Duplication Auditing in National-Scale Neuroimaging Repositories](https://arxiv.org/abs/2610.09614).
 
 ## Access the container image
 
