@@ -2,7 +2,7 @@
 
 Audit exact and near duplicates in T1-weighted brain MRI using a BIDS directory or a scan CSV.
 
-**Requirements:** Linux x86_64, Bash 4.3+, Apptainer or Singularity, and an NVIDIA GPU with a CUDA 12.8-compatible driver. The SIF includes dependencies and models. Read `LICENSE.pdf` before use.
+**Requirements:** Linux x86_64, Bash 4.3+, and Apptainer or Singularity. GPU execution requires an NVIDIA GPU with a CUDA 12.8-compatible driver. The SIF includes dependencies and models. Read `LICENSE.pdf` before use.
 
 ## 1. Download and prepare
 
@@ -46,7 +46,7 @@ dataset,subject_id,session_id,candidate
 DatasetA,sub-001,ses-01,/data/DatasetA/sub-001/ses-01/anat/sub-001_ses-01_T1w.nii.gz
 ```
 
-Use absolute paths. `candidate` is a T1w `.nii` or `.nii.gz` file; `dataset` and `subject_id` must be nonempty. `session_id` may be empty.
+Absolute paths are recommended. `candidate` may be a relative or absolute path, or a symlink to a T1w `.nii` or `.nii.gz` file. Relative paths resolve from the configuration directory, not the CSV directory. Omit leading `./` and repeated `/` in CSV paths to preserve metadata. Provide nonempty `dataset` and `subject_id`; `session_id` may be empty.
 
 ## 3. Run the pipeline
 
@@ -88,4 +88,4 @@ Cite the [arXiv preprint](https://arxiv.org/abs/2610.09614) and the [software re
 
 HAPPEN uses Vanderbilt's Non-Exclusive Non-Commercial Academic Software License Agreement (`LICENSE.pdf`). Use is limited to non-profit academic/research institutions for internal non-commercial research. Diagnostic/treatment use and redistribution by licensees are prohibited. Commercial licensing: cttc@vanderbilt.edu. Third-party notices: `resources/licenses/`.
 
-Source and documentation: [MASILab/HAPPEN](https://github.com/MASILab/HAPPEN).
+Source and full input/configuration reference: [MASILab/HAPPEN](https://github.com/MASILab/HAPPEN#configuration).

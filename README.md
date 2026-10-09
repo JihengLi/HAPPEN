@@ -1,143 +1,78 @@
 # HAPPEN: Human-in-the-Loop Auditing Pipeline for Exact and Near Duplicates in MRI Repositories
 
-HAPPEN is a containerized system for auditing identity duplication in large T1-weighted brain MRI repositories. It consists of two major components:
+HAPPEN audits exact and near duplicates in T1-weighted brain MRI repositories and produces reviewer-confirmed subject groups.
 
-- an auditing pipeline, which detects exact and near duplicates and generates reviewable outputs; and
-- a review interface, which supports human review and decision of the generated near-duplicate candidates.
-
-The auditing pipeline contains two stages:
-
-- **Stage I (`exact`)**: detects exact duplicates via SHA-256 voxel-array fingerprints.
-- **Stage II (`near`)**: detects identity-level near duplicates via a pretrained embedding model and FAISS similarity retrieval.
-
-Rather than automatically merging or deleting files, HAPPEN generates reviewable reports and candidate lists for human review. These outputs can then be examined in the built-in review interface.
-
-Instructions for using the review interface are provided in the **Review interface** section.
-
-**Paper (arXiv preprint):** [Identity-Duplication Auditing in National-Scale Neuroimaging Repositories](https://arxiv.org/abs/2610.09614).
+[Paper (arXiv preprint)](https://arxiv.org/abs/2610.09614) · [Container release](https://doi.org/10.5281/zenodo.21986366) · [License](LICENSE.pdf)
 
 ## Access the container image
 
-HAPPEN 0.1.3 is distributed through [Zenodo](https://doi.org/10.5281/zenodo.21986366) as:
+HAPPEN is distributed through [Zenodo](https://doi.org/10.5281/zenodo.21986366) as a prebuilt Singularity/Apptainer image with dependencies and pretrained models. For download, configuration, and execution instructions, see [zenodo/README.md](zenodo/README.md).
 
-- a **Singularity/Apptainer SIF image** containing the application, dependencies, and pretrained models
-- a **standalone launcher ZIP** containing the run-script, configuration template, citation metadata, and license notices
+## Run the current source
 
-Before downloading or using HAPPEN, read the [software license](LICENSE.pdf).
+**Requirements:** Linux x86_64, Git, and Conda. GPU execution requires an NVIDIA GPU with a CUDA 12.8-compatible driver. Read [LICENSE.pdf](LICENSE.pdf) before use.
 
-**Requirements:** Linux x86_64, Bash 4.3+, and Singularity or Apptainer. The GPU pipeline requires an NVIDIA GPU with a driver compatible with CUDA 12.8.
-
-### Zenodo download
-
-Download all five files listed under **Zenodo release files** from the same Zenodo record into one directory. From that directory, verify the downloads:
+### 1. Get the code and install dependencies
 
 ```bash
-sha256sum -c SHA256SUMS.txt
+git clone https://github.com/MASILab/HAPPEN.git
+cd HAPPEN
+conda create -n happen-source --override-channels -c conda-forge \
+  python=3.11 ants=2.6.2 pip -y
+conda activate happen-source
+python -m pip install uv
+uv sync --frozen
+command -v N4BiasFieldCorrection antsRegistrationSyN.sh antsRegistration antsApplyTransforms
 ```
 
-### Singularity / Apptainer
+Run the remaining commands from the HAPPEN directory with `happen-source` active.
 
-Set the absolute SIF path before changing directories, then extract and prepare the standalone launcher:
+### 2. Prepare the pretrained model
+
+Place the pretrained HAPPEN checkpoint at `resources/model.pth`. It is not included in Git. If you have the [released SIF](https://doi.org/10.5281/zenodo.21986366), you can extract its checkpoint with Apptainer or Singularity:
 
 ```bash
-export HAPPEN_IMAGE="$PWD/happen-v0.1.3-cu128.sif"
-
-unzip happen-0.1.3-launcher.zip
-cd happen-0.1.3
-chmod +x run_happen.sh
+apptainer exec --bind "$PWD/resources:/host-resources" \
+  /absolute/path/to/happen-v0.1.3-cu128.sif \
+  cp /app/resources/model.pth /host-resources/model.pth
 ```
 
-> [!IMPORTANT]
-> Please do **not** use `sudo` for normal execution with Singularity/Apptainer.  
-> Keep `HAPPEN_IMAGE` exported in the terminal used for the commands below. If you open a new terminal, set it again to the absolute path of the downloaded SIF.
+Replace `apptainer` with `singularity` if needed. The atlas is already in `resources/`.
 
-### Zenodo release files
+### 3. Set the input and output
 
-- Singularity/Apptainer SIF image:
-  `happen-v0.1.3-cu128.sif`
-
-- Standalone launcher package:
-  `happen-0.1.3-launcher.zip`
-
-- Complete software license:
-  `LICENSE.pdf`
-
-- Standalone quick-start instructions:
-  `README.md`
-
-- Download checksums:
-  `SHA256SUMS.txt`
-
-## Usage overview
-
-> [!IMPORTANT]
-> First, download and extract the Zenodo launcher package as shown above.
-> HAPPEN is launched by executing the `run_happen.sh` script in the extracted `happen-0.1.3/` directory. It handles launching the container, setting up the required bind
-> mounts, and passing the selected mode and configuration file into the container. Do **not** try to run `run_happen.sh` inside the container.
-
-General command pattern, with `HAPPEN_IMAGE` exported as shown above:
-
-```bash
-./run_happen.sh <mode> <config> [finalize] [--bind <host_path> ...]
-```
-
-| argument     | description                                                         |
-| ------------ | ------------------------------------------------------------------- |
-| HAPPEN_IMAGE | Environment variable containing the absolute path to the Zenodo SIF |
-| mode         | `pipeline` or `review` depending on task                            |
-| config       | user config file (TOML)                                             |
-| host_path    | additional location to mount on container                           |
-
-## Quick start
-
-From the extracted `happen-0.1.3/` directory, with `HAPPEN_IMAGE` exported as shown above:
-
-1. Copy the user configuration template:
+Copy the configuration template, then set an output directory and either a BIDS directory or scan CSV as described in [Configuration](#configuration):
 
 ```bash
 cp configs/config_usr.toml my_config.toml
 ```
 
-2. Edit `my_config.toml` and fill in the required paths using absolute paths.
-
-3. Run the full pipeline (mode set to `pipeline`):
+### 4. Run the pipeline
 
 ```bash
-./run_happen.sh pipeline my_config.toml
+uv run --frozen python -m happen.pipeline my_config.toml
 ```
 
-If your input data or output locations require additional host mounts, add one or more `--bind` arguments:
+### 5. Review and generate confirmed groups
 
 ```bash
-./run_happen.sh pipeline my_config.toml \
-  --bind /path/to/host1 \
-  --bind /path/to/host2
+uv run --frozen python -m happen.review my_config.toml
 ```
 
-4. After the pipeline has finished, launch the review interface with:
+Open **http://127.0.0.1:8000**, review candidate pairs, and save your decisions. Stop the server with `Ctrl+C`, then run:
 
 ```bash
-./run_happen.sh review my_config.toml
+uv run --frozen python -m happen.review my_config.toml finalize
 ```
 
-5. After the human review is complete, stop the review server with `Ctrl+C`, then generate the finalized confirmed reports:
+> [!IMPORTANT]
+> Use the same configuration and output directory for pipeline, review, and finalize.
 
-```bash
-./run_happen.sh review my_config.toml finalize
-```
+## Configuration
 
-## Input and configuration
+User configuration: [configs/config_usr.toml](configs/config_usr.toml).
 
-HAPPEN is configured through a user-provided TOML file, which is organized into four sections:
-
-- `[run]`: global run settings
-- `[exact]`: exact-duplicate auditing settings
-- `[near]`: near-duplicate retrieval and review-asset generation settings
-- `[review]`: review interface settings
-
-A minimal example is shown below:
-
-```
+```toml
   [run]
   out = ""
   stages = ["exact", "near"]
@@ -185,8 +120,6 @@ A minimal example is shown below:
 
 ### Important configuration guide
 
-For most users, only a small number of parameters need to be edited.
-
 #### 1. Output directory
 
 - `[run].out`: output directory for all generated artifacts, reports, logs, and review files.
@@ -197,30 +130,29 @@ For most users, only a small number of parameters need to be edited.
 
 #### 3. Exact-stage input
 
-The exact stage supports three input fields:
-
-- `root`
-- `candidates_csv`
-- `valid_csv`
-
 > [!IMPORTANT]
 > Set only **one** of the following stage input properties.
 
 - `[exact].root`: root directory of a BIDS-style filesystem. When `root` is provided, HAPPEN automatically searches the repository and discovers all eligible T1-weighted scans.
-- `[exact].candidates_csv`: path to a candidate CSV with the columns `dataset,subject_id,session_id,candidate`. Here, `candidate` is the input file path provided to the pipeline. HAPPEN performs an initial validation step and resolves each candidate to a usable `resolved_path`.
-- `[exact].valid_csv`: path to a validated CSV with the columns `dataset,subject_id,session_id,candidate,resolved_path`. This option is intended for cases where validation and path resolution have already been completed.
+- `[exact].candidates_csv`: path to a CSV with columns `dataset,subject_id,session_id,candidate`, one scan per row. `candidate` accepts absolute or relative NIfTI paths and file symlinks. HAPPEN checks the input paths and records their resolved targets in `valid.csv`.
+- `[exact].valid_csv`: path to a validated CSV with the columns `dataset,subject_id,session_id,candidate,resolved_path`. This option is intended for cases where validation and path resolution have already been completed. For an exact+near run, the CSV must also be available at `[run].out/exact/valid.csv`.
+
+```csv
+dataset,subject_id,session_id,candidate
+DatasetA,sub-001,ses-01,data/scan001.nii.gz
+```
+
+`dataset` and `subject_id` must be provided; `session_id` may be empty. Relative paths use the launch directory for source commands, or the configuration directory for `run_happen.sh`. Omit leading `./` and repeated `/` in CSV paths to preserve metadata.
 
 The exact stage also has two important runtime parameters:
 
 - `[exact].thread_workers`: number of thread-based workers used by the exact stage.
 - `[exact].process_workers`: number of process-based workers used by the exact stage.
 
-These values affect throughput and may need adjustment depending on the available CPU resources on your system.
-
 #### 4. Near-stage runtime settings
 
 - `preprocess_workers`: number of workers used during preprocessing. In our reference runs, we used preprocess_workers = 32 on a system with 48 GB GPU memory.
-- `device`: compute device to use.
+- `device`: compute device used by the HAPPEN embedding model.
 - `min_similarity`: similarity threshold for retaining near-duplicate candidates. Default is 0.92.
 
 #### 5. Review-asset preparation
@@ -238,8 +170,6 @@ These values affect throughput and may need adjustment depending on the availabl
 
 ### Other parameters
 
-The remaining parameters are usually safe to leave at their default values unless you have a specific reason to change them.
-
 #### `[run]`
 
 - `profile_runtime`: if `true`, HAPPEN records runtime profiling information.
@@ -247,9 +177,9 @@ The remaining parameters are usually safe to leave at their default values unles
 
 #### `[near]`
 
-- `batch_size`: number of embeddings buffered before each save during near-stage processing.
+- `batch_size`: number of preprocessed scans encoded together in each inference batch.
 - `use_amp`: if `true`, use automatic mixed precision when supported.
-- `fail_fast`: if `true`, stop immediately when an error occurs.
+- `fail_fast`: if `true`, stop the embedding processing loop after preprocessing or tensor-loading errors.
 - `topk`: number of nearest neighbors retrieved per query using FAISS before thresholding.
 - `retrieval_batch_size`: batch size used during FAISS retrieval.
 - `use_ivf`: whether to use IVF-based approximate nearest-neighbor retrieval.
@@ -260,7 +190,7 @@ The remaining parameters are usually safe to leave at their default values unles
 - `overwrite_embeddings`: if `true`, recompute embeddings even if cached outputs already exist.
 - `overwrite_retrieval`: if `true`, recompute retrieval outputs even if cached outputs already exist.
 - `overwrite_review_assets`: if `true`, regenerate review assets even if they already exist.
-- `max_scan_candidates_per_query`: maximum number of retained scan-level candidates per query.
+- `max_scan_candidates_per_query`: maximum number of candidate scans per query in the review table.
 
 #### `[review]`
 
@@ -269,7 +199,7 @@ The remaining parameters are usually safe to leave at their default values unles
 - `preview_max_width`: downsamples preview images to reduce browser memory usage.
 - `debug`: enables debug mode if set to `true`.
 
-## Outputs
+## Results
 
 All outputs are written under `[run].out`. The two main output folders are:
 
@@ -280,7 +210,7 @@ All outputs are written under `[run].out`. The two main output folders are:
 
 - `exact/duplicates.csv`: Exact deduplication result.
 - `exact/figures/files_matrix_T1w.html`: Clear visualization of the exact duplicates.
-- `near/scan_candidates.csv`: Near deduplication result.
+- `near/scan_candidates.csv`: Near-duplicate candidates for human review.
 - `near/review/review_decisions.csv` (after review): Human-in-the-loop auditing result.
 - `near/subject_groups.csv` (after finalize): Confirmed near-duplicate subject groups.
 - `near/figures/files_matrix_T1w.html` (after finalize): Clear visualization of the confirmed near duplicates.
@@ -292,11 +222,11 @@ All outputs are written under `[run].out`. The two main output folders are:
 - `candidates.csv`: candidate scans that searched from `[exact].root` or from input.
 - `valid.csv`: all validated T1w MRI scans that passed input checking or from input.
 - `invalid_missing_paths_discovery.csv`: scans removed because the input path could not be found.
-- `invalid_not_nifti_discovery.csv`: scans removed because the file was not a NIfTI image.
+- `invalid_not_nifti_discovery.csv`: scans removed because the resolved target lacks a NIfTI extension.
 - `invalid_permission_denied_paths_discovery.csv`: scans removed because the file could not be accessed due to permission errors.
-- `invalid_unreadable_discovery.csv`: scans removed because the file could not be read.
+- `invalid_unreadable_discovery.csv`: reserved readability-check output; currently empty. Image-loading failures are recorded in `hash_errors.csv`.
 - `invalid_derivatives.csv`: scans removed because they were recognized as derivatives rather than source scans.
-- `T1w_hashes.csv`: SHA-256 voxel-array hashes for all validated scans.
+- `T1w_hashes.csv`: SHA-256 voxel-array hashes for successfully hashed scans.
 - `hash_errors.csv`: scans that failed during hashing.
 - `duplicates.csv`: the main exact-duplicate table; all scans involved in exact duplicates, grouped by duplicate group.
 
@@ -314,24 +244,24 @@ All outputs are written under `[run].out`. The two main output folders are:
 
 #### `near/`
 
-- `no_exact_dup.csv`: near-stage input after removing exact duplicates.
-- `exact_removed.csv`: scans removed from the near stage because they were already identified as exact duplicates.
+- `no_exact_dup.csv`: near-stage input, retaining one representative per exact-duplicate group and excluding hash failures.
+- `exact_removed.csv`: scans excluded from the near stage as redundant exact duplicates or because hashing failed.
 - `embedding_manifest.csv`: manifest of scans used for embedding inference.
 - `embeddings.npy`: computed embeddings for the scans in `embedding_manifest.csv`.
 - `embedding_failures.csv`: scans that failed during preprocessing or embedding inference.
 - `raw_neighbors.csv`: raw FAISS retrieval results; for each scan, the top retrieved similar scans before final filtering.
 - `scan_candidates.csv`: the main near-duplicate output; final scan-level near-duplicate candidates after filtering.
-- `subject_edges.csv`: subject-level links derived from scan-level candidates.
-- `subject_groups.csv`: subject-level connected groups derived from the candidate graph.
+- `subject_edges.csv` (after finalize): subject-level links derived from positive human review decisions.
+- `subject_groups.csv` (after finalize): subject-level connected groups derived from those confirmed links.
 
 - `review/`: outputs used by the review tool.
   - `review_candidates.csv`: candidate pairs presented to the review interface.
   - `review_decisions.csv`: saved human review decisions.
-  - `scan_asset_failures.csv`: scans whose review PNGs could not be generated.
-  - `pair_asset_failures.csv`: scan pairs whose diff/checkerboard assets could not be generated.
+  - `scan_asset_failures.csv`: currently an empty compatibility table; scan-asset errors stop preparation.
+  - `pair_asset_failures.csv`: currently an empty compatibility table; pair-asset errors stop preparation.
   - `assets/png/`: PNG renderings of scans involved in review.
-  - `assets/diff/`: difference images for near-duplicate scan pairs.
-  - `assets/checkerboard/`: checkerboard comparison images for near-duplicate scan pairs.
+  - `assets/diff/`: difference images for near-duplicate scan pairs (`precompute` mode).
+  - `assets/checkerboard/`: checkerboard comparison images for near-duplicate scan pairs (`precompute` mode).
 
 - `by_category/`: finalized near-duplicate outputs reorganized by duplicate type after human review.
   - `within_datasets.csv`: confirmed near duplicates involving different recorded subjects within the same dataset.
@@ -347,7 +277,7 @@ All outputs are written under `[run].out`. The two main output folders are:
 
 HAPPEN also provides a built-in review interface for human inspection of near-duplicate candidates.
 
-The review interface is **scan-level**. For each query scan, the interface displays all candidate scans that satisfy the our filtering criteria. For each scan pair, HAPPEN reports the corresponding:
+The review interface is **scan-level**. For each query scan, the interface displays all candidate scans that satisfy the filtering criteria. For each scan pair, HAPPEN reports the corresponding:
 
 - dataset
 - subject
@@ -372,14 +302,14 @@ The interface contains three views:
 
 ### Keyboard navigation
 
-User can use keyboard navigation to change scans in `3. Review view`:
+Use the arrow keys to change scans in `3. Review view`:
 
 - Left / Right arrow keys: switch between candidate scans for the same query scan
 - Up / Down arrow keys: switch between query scans or subjects within the same dataset
 
 ## Citation
 
-If you use HAPPEN in research, please cite the [arXiv preprint](https://arxiv.org/abs/2610.09614) for the methodology and the [HAPPEN 0.1.3 software release](https://doi.org/10.5281/zenodo.21986366) for the version used. `CITATION.cff` contains both records; GitHub's **Cite this repository** shows the paper as the preferred citation.
+If you use HAPPEN in research, please cite the [arXiv preprint](https://arxiv.org/abs/2610.09614) for the methodology and the [HAPPEN software release](https://doi.org/10.5281/zenodo.21986366) for the version used. `CITATION.cff` contains both records; GitHub's **Cite this repository** shows the paper as the preferred citation.
 
 ```bibtex
 @article{li2026happen,
