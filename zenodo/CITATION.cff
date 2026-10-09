@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use HAPPEN in your research, please cite this software release."
+message: "If you use HAPPEN in your research, please cite the paper below and this software release."
 type: software
 
 title: "HAPPEN: Human-in-the-Loop Auditing Pipeline for Exact and Near Duplicates in MRI Repositories"
@@ -17,12 +17,12 @@ authors:
     orcid: "https://orcid.org/0009-0001-0638-1997"
 
 version: "0.1.3"
-date-released: "2026-10-06"
+date-released: "2026-10-09"
 doi: "10.5281/zenodo.21986366"
 url: "https://doi.org/10.5281/zenodo.21986366"
-repository-code: "https://github.com/JihengLi/HAPPEN"
+repository-code: "https://github.com/MASILab/HAPPEN"
 
-license-url: "https://github.com/JihengLi/HAPPEN/blob/main/LICENSE.pdf"
+license-url: "https://github.com/MASILab/HAPPEN/blob/main/LICENSE.pdf"
 
 keywords:
   - Magnetic Resonance Imaging
@@ -31,3 +31,47 @@ keywords:
   - identity duplication
   - duplicate detection
   - human-in-the-loop
+
+preferred-citation:
+  type: article
+  status: preprint
+  title: "Identity-Duplication Auditing in National-Scale Neuroimaging Repositories"
+  authors:
+    - family-names: "Li"
+      given-names: "Jiheng"
+    - family-names: "Kim"
+      given-names: "Michael E."
+    - family-names: "Schwartz"
+      given-names: "Trent M."
+    - family-names: "Cui"
+      given-names: "Yuhan"
+    - family-names: "Rudravaram"
+      given-names: "Gaurav"
+    - family-names: "Archer"
+      given-names: "Derek B."
+    - family-names: "Hohman"
+      given-names: "Timothy J."
+    - family-names: "Beason-Held"
+      given-names: "Lori L."
+    - family-names: "Morgan"
+      given-names: "Victoria L."
+    - family-names: "Englot"
+      given-names: "Dario J."
+    - family-names: "Jefferson"
+      given-names: "Angela L."
+    - name: "for the Alzheimer's Disease Neuroimaging Initiative"
+    - name: "for the BIOCARD Study team"
+    - name: "for the Health and Aging Brain Study: Health Disparities (HABS-HD) Study Team"
+    - family-names: "Zuo"
+      given-names: "Lianrui"
+    - family-names: "Erus"
+      given-names: "Guray"
+    - family-names: "Davatzikos"
+      given-names: "Christos"
+    - family-names: "Landman"
+      given-names: "Bennett A."
+  journal: "arXiv"
+  year: 2026
+  date-published: "2026-10-07"
+  doi: "10.48550/arXiv.2610.09614"
+  url: "https://arxiv.org/abs/2610.09614"

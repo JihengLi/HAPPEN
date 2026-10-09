@@ -1,6 +1,6 @@
 # Publish HAPPEN 0.1.3 to Zenodo
 
-Run these commands in Bash from the repository root on Linux x86_64 with Docker, Apptainer, Python 3.11+, and an NVIDIA GPU. Put the correct pretrained weights at `resources/model.pth` first; this file is not supplied by Git.
+Run these commands in Bash from the repository root on Linux x86_64 with Docker, Apptainer, Python 3.11+, and an NVIDIA GPU. Put the correct pretrained weights at `resources/model.pth` first; this file is not supplied by Git. The container can be built before a separate Hugging Face release; it uses this local checkpoint. Later README or download-link edits do not require rebuilding the container.
 
 ## 1. Build Docker and SIF
 
@@ -38,7 +38,7 @@ apptainer exec --nv "$HAPPEN_IMAGE" python -c \
   "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
 ```
 
-The two PDF hashes must match, and the license label must be `LicenseRef-HAPPEN-NonCommercial-Academic`. Model loading must finish without missing/unexpected-key warnings. Follow `zenodo/README.md` to test pipeline, review, and finalization on a small MRI dataset before uploading.
+The two PDF hashes must match. The image labels must show source `https://github.com/MASILab/HAPPEN` and license `LicenseRef-HAPPEN-NonCommercial-Academic`. Model loading must finish without missing/unexpected-key warnings. Follow `zenodo/README.md` to test pipeline, review, and finalization on a small MRI dataset before uploading.
 
 ## 3. Package the release
 
@@ -95,9 +95,31 @@ unset ZENODO_TOKEN
 
 This uses Zenodo's [large-file upload API](https://developers.zenodo.org/#quickstart-upload). Same-name uploads replace the current draft file. Retries restart the complete file; HTTP PUT uploads do not support [curl resume](https://curl.se/docs/manpage.html#-C). Stop an active browser upload of the same file first.
 
-After upload, check all five files in the Zenodo draft. Choose **Software**, use version `0.1.3`, and copy the citation/date/DOI information from `zenodo/CITATION.cff`. Set the license to **Add custom**:
+After upload, check all five files in the Zenodo draft. Choose **Software**, use version `0.1.3`, and use the top-level software metadata in `zenodo/CITATION.cff` (not the paper under `preferred-citation`). Set the license to **Add custom**:
 
 - Title: **Non-Exclusive Non-Commercial Academic Software License Agreement**
-- URL: `https://github.com/JihengLi/HAPPEN/blob/main/LICENSE.pdf`
+- URL: `https://github.com/MASILab/HAPPEN/blob/main/LICENSE.pdf`
 
 Keep the official PDF unchanged. Review the metadata and click **Publish** in Zenodo; the commands above only upload files. After publishing, send CTTC the GitHub and Zenodo record links.
+
+## 5. Update README or citation only
+
+Keep the existing SIF and repackage without rebuilding:
+
+```bash
+python3 zenodo/package_release.py --sif zenodo/happen-v0.1.3-cu128.sif \
+  --output-dir zenodo/dist/zenodo-0.1.3-arxiv
+(cd zenodo/dist/zenodo-0.1.3-arxiv && sha256sum -c SHA256SUMS.txt)
+```
+
+For minor corrections within 30 days of publication, choose **Edit published files** in Zenodo; republishing keeps the DOI ([policy](https://help.zenodo.org/docs/deposit/manage-files/#modify-files-after-publication)). In the web edit form, keep the SIF and `LICENSE.pdf`; replace only `README.md`, `happen-0.1.3-launcher.zip`, and `SHA256SUMS.txt`, then publish. Section 4's upload script is for unpublished deposits; do not remove its `submitted` check to edit a published record.
+
+If file editing is unavailable, create a new version and import the existing files. A new version gets a new software DOI: update the software DOI/URL in both CFF files and both README files before repackaging. For this unpublished draft, section 4 can upload only the three changed files: set `ZENODO_UPLOAD_DIR` to the new output directory and `ZENODO_FILES=(README.md happen-0.1.3-launcher.zip SHA256SUMS.txt)`.
+
+In the record description, add: **The methodology is described in the arXiv preprint [Identity-Duplication Auditing in National-Scale Neuroimaging Repositories](https://arxiv.org/abs/2610.09614). Please cite the paper and this software release when using HAPPEN in research.** Update the source link to `https://github.com/MASILab/HAPPEN`. Under **Related works**, add DOI `10.48550/arXiv.2610.09614` with relation **Is described by**. Keep the record type **Software**; use the paper DOI only in **Related works**, not as the software record's DOI.
+
+## Repository links
+
+Use `https://github.com/MASILab/HAPPEN` as the source and license-link base in Zenodo, new container builds, and any future Hugging Face model card. Keep `MASILab/HAPPEN-Release` synchronized with the same commits so the address in the submitted paper continues to work.
+
+If you rebuild the SIF, upload the new SIF and regenerated `SHA256SUMS.txt` as well as the updated README/launcher. Section 5 applies only when reusing an unchanged SIF. Keep a copy of any published image before using the `--force` build command.

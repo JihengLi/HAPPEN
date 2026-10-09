@@ -14,6 +14,8 @@ Rather than automatically merging or deleting files, HAPPEN generates reviewable
 
 Instructions for using the review interface are provided in the **Review interface** section.
 
+**Paper (arXiv preprint):** [Identity-Duplication Auditing in National-Scale Neuroimaging Repositories](https://arxiv.org/abs/2610.09614).
+
 ## Access the container image
 
 HAPPEN 0.1.3 is distributed through [Zenodo](https://doi.org/10.5281/zenodo.21986366) as:
@@ -79,12 +81,12 @@ General command pattern, with `HAPPEN_IMAGE` exported as shown above:
 ./run_happen.sh <mode> <config> [finalize] [--bind <host_path> ...]
 ```
 
-| argument        | description                                                        |
-| --------------- | ------------------------------------------------------------------ |
-| HAPPEN_IMAGE    | Environment variable containing the absolute path to the Zenodo SIF |
-| mode            | `pipeline` or `review` depending on task                           |
-| config          | user config file (TOML)                                            |
-| host_path       | additional location to mount on container                          |
+| argument     | description                                                         |
+| ------------ | ------------------------------------------------------------------- |
+| HAPPEN_IMAGE | Environment variable containing the absolute path to the Zenodo SIF |
+| mode         | `pipeline` or `review` depending on task                            |
+| config       | user config file (TOML)                                             |
+| host_path    | additional location to mount on container                           |
 
 ## Quick start
 
@@ -374,6 +376,38 @@ User can use keyboard navigation to change scans in `3. Review view`:
 
 - Left / Right arrow keys: switch between candidate scans for the same query scan
 - Up / Down arrow keys: switch between query scans or subjects within the same dataset
+
+## Citation
+
+If you use HAPPEN in research, please cite the [arXiv preprint](https://arxiv.org/abs/2610.09614) for the methodology and the [HAPPEN 0.1.3 software release](https://doi.org/10.5281/zenodo.21986366) for the version used. `CITATION.cff` contains both records; GitHub's **Cite this repository** shows the paper as the preferred citation.
+
+```bibtex
+@article{li2026happen,
+  title = {Identity-Duplication Auditing in National-Scale Neuroimaging Repositories},
+  author = {Li, Jiheng and
+            Kim, Michael E. and
+            Schwartz, Trent M. and
+            Cui, Yuhan and
+            Rudravaram, Gaurav and
+            Archer, Derek B. and
+            Hohman, Timothy J. and
+            Beason-Held, Lori L. and
+            Morgan, Victoria L. and
+            Englot, Dario J. and
+            Jefferson, Angela L. and
+            {for the Alzheimer's Disease Neuroimaging Initiative} and
+            {for the BIOCARD Study team} and
+            {for the Health and Aging Brain Study: Health Disparities (HABS-HD) Study Team} and
+            Zuo, Lianrui and
+            Erus, Guray and
+            Davatzikos, Christos and
+            Landman, Bennett A.},
+  journal = {arXiv preprint arXiv:2610.09614},
+  year = {2026},
+  doi = {10.48550/arXiv.2610.09614},
+  url = {https://arxiv.org/abs/2610.09614}
+}
+```
 
 ## License
 

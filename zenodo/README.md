@@ -1,18 +1,12 @@
-# HAPPEN 0.1.3 Quick start
+# HAPPEN 0.1.3
 
-HAPPEN audits identity duplication in T1-weighted brain MRI repositories using exact-duplicate detection, pretrained similarity retrieval, and human review. Finalization generates reviewer-confirmed subject groups.
+Audit exact and near duplicates in T1-weighted brain MRI using a BIDS directory or a scan CSV.
 
-**Requirements:** Linux x86_64, Bash 4.3+, and Apptainer or Singularity. The GPU pipeline needs an NVIDIA GPU with a driver compatible with CUDA 12.8. Application dependencies and models are inside the SIF.
+**Requirements:** Linux x86_64, Bash 4.3+, Apptainer or Singularity, and an NVIDIA GPU with a CUDA 12.8-compatible driver. The SIF includes dependencies and models. Read `LICENSE.pdf` before use.
 
 ## 1. Download and prepare
 
-Download these five files from the same Zenodo record into one directory:
-
-- `happen-v0.1.3-cu128.sif`
-- `happen-0.1.3-launcher.zip`
-- `LICENSE.pdf`
-- `README.md`
-- `SHA256SUMS.txt`
+Download `happen-v0.1.3-cu128.sif`, `happen-0.1.3-launcher.zip`, `README.md`, `LICENSE.pdf`, and `SHA256SUMS.txt` from the same Zenodo record into one directory.
 
 ```bash
 sha256sum -c SHA256SUMS.txt
@@ -23,17 +17,17 @@ chmod +x run_happen.sh
 cp configs/config_usr.toml my_config.toml
 ```
 
-## 2. Configure
+## 2. Set the output and input
 
-Edit these entries in `my_config.toml`; keep the remaining template settings:
+Edit these entries in `my_config.toml`; keep the remaining settings:
 
 ```toml
 [run]
-out = "/absolute/path/to/happen-output"
+out = "/absolute/path/to/results"
 stages = ["exact", "near"]
 
 [exact]
-root = "/absolute/path/to/bids-repository"
+root = "/absolute/path/to/BIDS"
 candidates_csv = ""
 valid_csv = ""
 
@@ -45,43 +39,53 @@ host = "127.0.0.1"
 port = 8000
 ```
 
-Use absolute paths. Choose exactly one input: a BIDS-style `root`, `candidates_csv`, or `valid_csv`.
+For CSV input, set `root = ""` and `candidates_csv = "/absolute/path/to/scans.csv"`; keep `valid_csv` empty. Use this format, one scan per row:
 
-CSV headers:
+```csv
+dataset,subject_id,session_id,candidate
+DatasetA,sub-001,ses-01,/data/DatasetA/sub-001/ses-01/anat/sub-001_ses-01_T1w.nii.gz
+```
 
-- `candidates_csv`: `dataset,subject_id,session_id,candidate`
-- `valid_csv`: `dataset,subject_id,session_id,candidate,resolved_path`
+Use absolute paths. `candidate` is a T1w `.nii` or `.nii.gz` file; `dataset` and `subject_id` must be nonempty. `session_id` may be empty.
 
-MRI paths in CSVs must be accessible inside the container. Add their data directories with `--bind`, including external symlink targets. Match worker counts and batch size to your CPU/GPU allocation.
+## 3. Run the pipeline
 
-## 3. Run, review, and finalize
+For BIDS input:
 
 ```bash
 ./run_happen.sh pipeline my_config.toml
-# For CSV input or additional data directories, use:
-# ./run_happen.sh pipeline my_config.toml --bind /absolute/path/to/mri-data
+```
 
+For CSV input, mount the MRI data directory:
+
+```bash
+./run_happen.sh pipeline my_config.toml --bind /data
+```
+
+Replace `/data` with the directory containing your MRI files. Repeat `--bind` for other directories or external symlink targets. Match worker counts and batch size to your CPU/GPU resources.
+
+## 4. Review candidates
+
+```bash
 ./run_happen.sh review my_config.toml
 ```
 
-Open **http://127.0.0.1:8000** and review candidate pairs. For a remote server, run this on your own computer:
+Open **http://127.0.0.1:8000**, review candidate pairs, and save your decisions.
 
-```bash
-ssh -N -L 8000:127.0.0.1:8000 username@server
-```
+## 5. Generate confirmed groups
 
-For a cluster job, the tunnel must reach the compute node running review. Adjust both ports if you changed the configuration.
-
-After saving your decisions, stop the review server with `Ctrl+C` and run:
+Stop review with `Ctrl+C`, then run:
 
 ```bash
 ./run_happen.sh review my_config.toml finalize
 ```
 
-Outputs are under `[run].out`: exact groups in `exact/duplicates.csv`, review decisions in `near/review/review_decisions.csv`, and confirmed subject groups in `near/subject_groups.csv` after finalization. Keep the same configuration/output directory for all three commands. Review and finalization do not request GPU passthrough.
+Keep the same configuration and output directory throughout. Results are under `[run].out`: `exact/duplicates.csv` contains exact groups; `near/subject_groups.csv` contains confirmed near-duplicate groups after finalization. Decisions are in `near/review/review_decisions.csv`.
 
-## Citation and licenses
+## Citation and license
 
-Cite [HAPPEN 0.1.3](https://doi.org/10.5281/zenodo.21986366); metadata is in `CITATION.cff`. Before downloading or using HAPPEN, read Vanderbilt's [Non-Exclusive Non-Commercial Academic Software License Agreement](https://github.com/JihengLi/HAPPEN/blob/main/LICENSE.pdf), attached as `LICENSE.pdf` and included in the launcher ZIP. It is available only to non-profit academic and/or research institutions for internal non-commercial research. Diagnostic/treatment use and redistribution by licensees are prohibited. Commercial licensing: cttc@vanderbilt.edu. Third-party notices remain in `resources/licenses/`.
+Cite the [arXiv preprint](https://arxiv.org/abs/2610.09614) and the [software release](https://doi.org/10.5281/zenodo.21986366). Both records are in `CITATION.cff`.
 
-Source and extended documentation: [github.com/JihengLi/HAPPEN](https://github.com/JihengLi/HAPPEN).
+HAPPEN uses Vanderbilt's Non-Exclusive Non-Commercial Academic Software License Agreement (`LICENSE.pdf`). Use is limited to non-profit academic/research institutions for internal non-commercial research. Diagnostic/treatment use and redistribution by licensees are prohibited. Commercial licensing: cttc@vanderbilt.edu. Third-party notices: `resources/licenses/`.
+
+Source and documentation: [MASILab/HAPPEN](https://github.com/MASILab/HAPPEN).
